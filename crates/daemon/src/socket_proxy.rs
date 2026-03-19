@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
+use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::ffi::VmHandle;
@@ -34,7 +35,7 @@ impl DockerSocketProxy {
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
@@ -50,17 +51,27 @@ impl DockerSocketProxy {
         );
 
         loop {
-            let (client_stream, _) = listener.accept().await?;
-            debug!("accepted docker client connection, waiting for guest vsock...");
-            let vm_handle = self.vm_handle.clone();
-            let port = self.vsock_port;
-
-            tokio::spawn(async move {
-                if let Err(e) = proxy_via_vsock(client_stream, vm_handle, port).await {
-                    error!("proxy error: {e:#}");
+            tokio::select! {
+                result = listener.accept() => {
+                    let (client_stream, _) = result?;
+                    debug!("accepted docker client connection, waiting for guest vsock...");
+                    let vm_handle = self.vm_handle.clone();
+                    let port = self.vsock_port;
+                    tokio::spawn(async move {
+                        if let Err(e) = proxy_via_vsock(client_stream, vm_handle, port).await {
+                            error!("proxy error: {e:#}");
+                        }
+                    });
                 }
-            });
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("proxy shutting down");
+                        break;
+                    }
+                }
+            }
         }
+        Ok(())
     }
 }
 

@@ -1,11 +1,13 @@
 mod ffi;
+mod port_forward;
 mod socket_proxy;
 mod vm;
 
 use anyhow::Result;
 use mako_common::config::MakoConfig;
-
-use tracing::{error, info};
+use std::sync::Arc;
+use tokio::sync::watch;
+use tracing::{error, info, warn};
 
 /// makod -- the Mako daemon.
 ///
@@ -21,43 +23,61 @@ fn main() {
 
     info!(version = env!("CARGO_PKG_VERSION"), "starting makod");
 
+    write_pid_file();
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
     rt.spawn(async {
         if let Err(e) = run_daemon().await {
             error!(?e, "daemon error");
+            cleanup_pid_file();
             std::process::exit(1);
         }
     });
 
-    // macOS main run loop -- services DispatchQueue.main for VZ operations
     unsafe { core_foundation::CFRunLoopRun() };
 }
 
 async fn run_daemon() -> Result<()> {
     let config = MakoConfig::load()?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Spawn signal handler
+    let config_for_cleanup = config.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!("shutdown signal received, cleaning up...");
+        let _ = shutdown_tx.send(true);
+
+        // Clean up socket and PID file
+        if config_for_cleanup.docker_socket_path.exists() {
+            std::fs::remove_file(&config_for_cleanup.docker_socket_path).ok();
+            info!("removed docker socket");
+        }
+        cleanup_pid_file();
+        info!("mako daemon stopped");
+
+        // Stop the CFRunLoop so the process exits
+        unsafe { core_foundation::CFRunLoopStop(core_foundation::CFRunLoopGetMain()) };
+    });
 
     info!("booting Linux VM...");
-    let vm_manager = vm::VmManager::new(config.clone())?;
+    let vm_manager = Arc::new(vm::VmManager::new(config.clone())?);
 
-    // Start the VM, but setup the vsock listener before waiting for MAKO_VM_READY
-    // so the guest agent can connect as soon as it starts.
     let vm_handle = vm_manager.start_and_get_handle().await?;
 
-    // Start vsock listener immediately (before guest finishes booting)
     let vsock_port = config.vsock_docker_port;
     let vm_for_listen = vm_handle.clone();
     tokio::task::spawn_blocking(move || vm_for_listen.vsock_listen(vsock_port)).await??;
     info!(vsock_port, "vsock listener ready for guest connections");
 
-    // Now wait for the VM to be fully ready (dockerd started, etc.)
     vm_manager.wait_for_ready().await?;
 
     info!("VM is ready, starting Docker socket proxy");
 
     let proxy = socket_proxy::DockerSocketProxy::new(
         config.docker_socket_path.clone(),
-        vm_handle,
+        vm_handle.clone(),
         config.vsock_docker_port,
     );
 
@@ -67,13 +87,63 @@ async fn run_daemon() -> Result<()> {
         config.docker_socket_path.display()
     );
 
-    proxy.run().await?;
+    // Start port forwarder (monitors containers and creates localhost listeners)
+    let port_fwd = port_forward::PortForwarder::new(
+        vm_handle,
+        vm_manager.vm_ip_ref(),
+        config.docker_socket_path.clone(),
+    );
+    let port_fwd_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        port_fwd.run(port_fwd_shutdown).await;
+    });
+
+    proxy.run(shutdown_rx).await?;
+
+    // If we get here, shutdown was requested
+    info!("proxy stopped, requesting VM stop...");
+    if let Err(e) = vm_manager.stop().await {
+        warn!(?e, "VM stop error (may already be stopped)");
+    }
 
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    tokio::select! {
+        _ = ctrl_c => info!("received SIGINT"),
+        _ = sigterm.recv() => info!("received SIGTERM"),
+    }
+}
+
+fn pid_file_path() -> std::path::PathBuf {
+    mako_common::config::mako_data_dir().join("makod.pid")
+}
+
+fn write_pid_file() {
+    let path = pid_file_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("warning: failed to create PID dir: {e}");
+        }
+    }
+    match std::fs::write(&path, std::process::id().to_string()) {
+        Ok(_) => eprintln!("PID file: {}", path.display()),
+        Err(e) => eprintln!("warning: failed to write PID file {}: {e}", path.display()),
+    }
+}
+
+fn cleanup_pid_file() {
+    std::fs::remove_file(pid_file_path()).ok();
 }
 
 mod core_foundation {
     extern "C" {
         pub fn CFRunLoopRun();
+        pub fn CFRunLoopGetMain() -> *mut std::ffi::c_void;
+        pub fn CFRunLoopStop(rl: *mut std::ffi::c_void);
     }
 }

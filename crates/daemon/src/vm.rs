@@ -154,15 +154,11 @@ impl VmManager {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        {
-            let state = self.state.read().await;
-            if *state != VmState::Running {
-                anyhow::bail!("VM is not running");
-            }
-        }
         *self.state.write().await = VmState::Stopping;
 
-        if let Some(h) = self.handle.write().await.take() {
+        if let Some(h) = self.handle_arc.write().await.take() {
+            tokio::task::spawn_blocking(move || h.stop()).await??;
+        } else if let Some(h) = self.handle.write().await.take() {
             tokio::task::spawn_blocking(move || h.stop()).await??;
         }
 
@@ -178,6 +174,10 @@ impl VmManager {
 
     pub async fn vm_ip(&self) -> Option<String> {
         self.vm_ip.read().await.clone()
+    }
+
+    pub fn vm_ip_ref(&self) -> Arc<RwLock<Option<String>>> {
+        self.vm_ip.clone()
     }
 
     /// Take the VmHandle out wrapped in an Arc for sharing with the socket proxy.

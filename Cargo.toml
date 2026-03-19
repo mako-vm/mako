@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/mako-vm/mako"
+repository = "https://github.com/adilhafeez/mako"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -24,6 +24,7 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

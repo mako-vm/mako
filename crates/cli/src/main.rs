@@ -1,6 +1,7 @@
 mod commands;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "mako", about = "Fast, lightweight Docker for macOS", version)]
@@ -27,7 +28,7 @@ enum Commands {
     Stop,
     /// Show status of the VM and Docker engine
     Status,
-    /// Build and install the VM image (requires Docker)
+    /// Build and install the VM image
     Setup,
     /// Show Mako version and system info
     Info,
@@ -35,6 +36,12 @@ enum Commands {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -67,5 +74,9 @@ async fn main() -> anyhow::Result<()> {
             ConfigAction::Reset => commands::config_reset().await,
             ConfigAction::Set { key, value } => commands::config_set(&key, &value).await,
         },
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "mako", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }

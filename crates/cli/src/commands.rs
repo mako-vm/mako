@@ -101,16 +101,41 @@ pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> 
 pub async fn stop() -> anyhow::Result<()> {
     println!("{}", "Stopping Mako...".green().bold());
 
-    // Find makod process and send SIGTERM
-    let output = Command::new("pkill").args(["-f", "makod"]).output()?;
+    let pid_file = mako_data_dir().join("makod.pid");
+    let mut stopped = false;
 
-    if output.status.success() {
+    if pid_file.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                unsafe {
+                    if libc::kill(pid, libc::SIGTERM) == 0 {
+                        println!("  Sent SIGTERM to makod (PID {})", pid);
+                        // Wait up to 5s for graceful shutdown
+                        for _ in 0..50 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            if libc::kill(pid, 0) != 0 {
+                                break;
+                            }
+                        }
+                        stopped = true;
+                    }
+                }
+            }
+        }
+        std::fs::remove_file(&pid_file).ok();
+    }
+
+    if !stopped {
+        let output = Command::new("pkill").args(["-f", "makod"]).output()?;
+        stopped = output.status.success();
+    }
+
+    if stopped {
         println!("{}", "Mako stopped.".green());
     } else {
         println!("{}", "No running Mako instance found.".yellow());
     }
 
-    // Clean up the socket file
     let config = MakoConfig::load()?;
     if config.docker_socket_path.exists() {
         std::fs::remove_file(&config.docker_socket_path).ok();
