@@ -237,21 +237,16 @@ The resulting binary is copied into the rootfs during `mako setup`.
 - Docker engine (dockerd 27.5.1, containerd, runc inside Alpine VM)
 - Docker socket proxy (reverse vsock relay, half-close propagation)
 - Port forwarding (container `-p` ports accessible on `localhost`)
-- VirtioFS file sharing (macOS home directory mounted at `/mnt/host` in VM)
+- VirtioFS file sharing (configurable via `mako config set vm.share.<tag>=<path>`, defaults to home dir)
 - Rosetta x86 emulation on Apple Silicon (VirtioFS share configured)
-- CLI: start, stop, status, setup, info, config, completions
+- CLI: start, stop, status, setup, info, config, completions, images, ps, run, logs, exec
+- Kubernetes: `mako kubernetes enable/disable/status/kubeconfig` (runs K3s as a container)
+- DNS forwarding: `*.mako.local` resolves container names from macOS (via `/etc/resolver/mako.local`)
+- Memory monitoring: daemon tracks per-container memory usage (virtio-balloon device configured)
 - macOS menu bar GUI (SwiftUI): daemon detection, container list, start/stop
 - Launch at login (launchd plist helper)
 - Shell completions (zsh, bash, fish)
+- CI/CD: GitHub Actions (check, clippy, fmt, build, cross-compile agent, build GUI)
 - Pre-commit hooks (fmt, clippy, check)
-
-**Partially implemented:**
-- Dynamic memory: virtio-balloon device is configured in `MakoVM.swift` but no daemon-side policy drives it
-- VirtioFS shares: `SharedDirectory` type exists in `types.rs` with defaults, but the FFI bridge hardcodes the home directory in Swift — Rust config is not passed through
-
-**Not yet implemented:**
-- Kubernetes (K3s): bundle K3s, `mako kubernetes enable/disable`, kubeconfig generation
-- DNS forwarding: resolve container names from macOS (e.g. `*.mako.local`)
-- CI/CD: no GitHub Actions workflows
-- Distribution: no Homebrew formula, signed app bundle, or install script
-- Convenience CLI wrappers: no `mako images`, `mako logs`, `mako exec` (users use `docker` CLI directly)
+- Docker Compose: works via socket passthrough, integration test in `tests/`
+- Distribution: install script (`install.sh`), Homebrew formula template (`Formula/mako.rb`)

@@ -15,6 +15,12 @@ extern "C" {
         vsock_docker_port: u32,
     ) -> *mut c_void;
 
+    fn mako_vm_add_share(
+        handle: *mut c_void,
+        tag: *const c_char,
+        host_path: *const c_char,
+        read_only: bool,
+    );
     fn mako_vm_configure(handle: *mut c_void) -> i32;
     fn mako_vm_start(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
     fn mako_vm_stop(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
@@ -42,6 +48,13 @@ pub struct VmFfiConfig {
     pub rosetta: bool,
     pub vsock_control_port: u32,
     pub vsock_docker_port: u32,
+    pub shared_directories: Vec<SharedDirConfig>,
+}
+
+pub struct SharedDirConfig {
+    pub tag: String,
+    pub host_path: String,
+    pub read_only: bool,
 }
 
 pub struct VmHandle {
@@ -90,6 +103,15 @@ impl VmHandle {
         if ptr.is_null() {
             anyhow::bail!("mako_vm_create returned null");
         }
+
+        for share in &config.shared_directories {
+            let tag = CString::new(share.tag.as_str())?;
+            let host_path = CString::new(share.host_path.as_str())?;
+            unsafe {
+                mako_vm_add_share(ptr, tag.as_ptr(), host_path.as_ptr(), share.read_only);
+            }
+        }
+
         Ok(Self { ptr })
     }
 

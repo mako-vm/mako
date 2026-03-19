@@ -1,4 +1,6 @@
+mod dns;
 mod ffi;
+mod memory;
 mod port_forward;
 mod socket_proxy;
 mod vm;
@@ -96,6 +98,22 @@ async fn run_daemon() -> Result<()> {
     let port_fwd_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         port_fwd.run(port_fwd_shutdown).await;
+    });
+
+    // Start DNS forwarder (resolves *.mako.local to container IPs)
+    let dns_fwd = dns::DnsForwarder::new(config.docker_socket_path.clone(), vm_manager.vm_ip_ref());
+    let dns_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        dns_fwd.run(dns_shutdown).await;
+    });
+
+    // Start memory monitor (tracks container memory usage)
+    let mem_monitor =
+        memory::MemoryMonitor::new(config.docker_socket_path.clone(), config.vm.memory_bytes);
+    let _mem_stats = mem_monitor.stats_ref();
+    let mem_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        mem_monitor.run(mem_shutdown).await;
     });
 
     proxy.run(shutdown_rx).await?;

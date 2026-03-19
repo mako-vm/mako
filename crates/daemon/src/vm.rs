@@ -1,4 +1,4 @@
-use crate::ffi::{VmFfiConfig, VmHandle};
+use crate::ffi::{SharedDirConfig, VmFfiConfig, VmHandle};
 use anyhow::Result;
 use mako_common::config::MakoConfig;
 use mako_common::types::VmState;
@@ -71,6 +71,20 @@ impl VmManager {
             "booting VM"
         );
 
+        let shared_directories = self
+            .config
+            .vm
+            .shared_directories
+            .iter()
+            .filter_map(|sd| {
+                sd.host_path.as_ref().map(|p| SharedDirConfig {
+                    tag: sd.mount_tag.clone(),
+                    host_path: p.to_string_lossy().into_owned(),
+                    read_only: sd.read_only,
+                })
+            })
+            .collect();
+
         let ffi_config = VmFfiConfig {
             cpu_count: self.config.vm.cpu_count,
             memory_bytes: self.config.vm.memory_bytes,
@@ -80,6 +94,7 @@ impl VmManager {
             rosetta: self.config.vm.rosetta,
             vsock_control_port: self.config.vsock_control_port,
             vsock_docker_port: self.config.vsock_docker_port,
+            shared_directories,
         };
 
         let vm_handle = tokio::task::spawn_blocking(move || -> Result<VmHandle> {

@@ -43,6 +43,76 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// List Docker images
+    Images,
+    /// Show container logs
+    Logs {
+        /// Container name or ID
+        container: String,
+        /// Follow log output
+        #[arg(long, short)]
+        follow: bool,
+        /// Number of lines to show from the end
+        #[arg(long, short = 'n')]
+        tail: Option<String>,
+    },
+    /// Execute a command in a running container
+    Exec {
+        /// Container name or ID
+        container: String,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+        /// Interactive mode
+        #[arg(long, short)]
+        interactive: bool,
+        /// Allocate a pseudo-TTY
+        #[arg(long, short)]
+        tty: bool,
+    },
+    /// List running containers (alias for docker ps)
+    Ps {
+        /// Show all containers (not just running)
+        #[arg(long, short)]
+        all: bool,
+    },
+    /// Manage Kubernetes (K3s)
+    Kubernetes {
+        #[command(subcommand)]
+        action: KubernetesAction,
+    },
+    /// Run a container
+    Run {
+        /// Docker image
+        image: String,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+        /// Run in background
+        #[arg(long, short)]
+        detach: bool,
+        /// Remove container on exit
+        #[arg(long)]
+        rm: bool,
+        /// Container name
+        #[arg(long)]
+        name: Option<String>,
+        /// Publish ports (e.g. 8080:80)
+        #[arg(long, short)]
+        publish: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum KubernetesAction {
+    /// Enable Kubernetes (downloads and starts K3s in the VM)
+    Enable,
+    /// Disable Kubernetes (stops K3s)
+    Disable,
+    /// Show Kubernetes status
+    Status,
+    /// Print kubeconfig to stdout
+    Kubeconfig,
 }
 
 #[derive(Subcommand)]
@@ -77,6 +147,84 @@ async fn main() -> anyhow::Result<()> {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "mako", &mut std::io::stdout());
             Ok(())
+        }
+        Commands::Kubernetes { action } => match action {
+            KubernetesAction::Enable => commands::k8s_enable().await,
+            KubernetesAction::Disable => commands::k8s_disable().await,
+            KubernetesAction::Status => commands::k8s_status().await,
+            KubernetesAction::Kubeconfig => commands::k8s_kubeconfig().await,
+        },
+        Commands::Images => commands::docker_passthrough(&["images"]).await,
+        Commands::Logs {
+            container,
+            follow,
+            tail,
+        } => {
+            let mut args = vec!["logs"];
+            if follow {
+                args.push("-f");
+            }
+            let tail_val;
+            if let Some(ref t) = tail {
+                args.push("--tail");
+                tail_val = t.clone();
+                args.push(&tail_val);
+            }
+            args.push(&container);
+            commands::docker_passthrough(&args).await
+        }
+        Commands::Exec {
+            container,
+            command,
+            interactive,
+            tty,
+        } => {
+            let mut args = vec!["exec".to_string()];
+            if interactive {
+                args.push("-i".to_string());
+            }
+            if tty {
+                args.push("-t".to_string());
+            }
+            args.push(container);
+            args.extend(command);
+            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            commands::docker_passthrough(&str_args).await
+        }
+        Commands::Ps { all } => {
+            let mut args = vec!["ps"];
+            if all {
+                args.push("-a");
+            }
+            commands::docker_passthrough(&args).await
+        }
+        Commands::Run {
+            image,
+            command,
+            detach,
+            rm,
+            name,
+            publish,
+        } => {
+            let mut args = vec!["run".to_string()];
+            if detach {
+                args.push("-d".to_string());
+            }
+            if rm {
+                args.push("--rm".to_string());
+            }
+            if let Some(ref n) = name {
+                args.push("--name".to_string());
+                args.push(n.clone());
+            }
+            for p in &publish {
+                args.push("-p".to_string());
+                args.push(p.clone());
+            }
+            args.push(image);
+            args.extend(command);
+            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            commands::docker_passthrough(&str_args).await
         }
     }
 }

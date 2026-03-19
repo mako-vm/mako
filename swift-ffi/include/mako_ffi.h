@@ -18,6 +18,19 @@ MakoVMHandle* mako_vm_create(
     uint32_t vsock_docker_port
 );
 
+/*
+ * Add a VirtioFS shared directory before calling configure.
+ * tag: mount tag visible inside the guest
+ * host_path: absolute path on macOS to share
+ * read_only: whether the share is read-only
+ */
+void mako_vm_add_share(
+    MakoVMHandle* handle,
+    const char* tag,
+    const char* host_path,
+    bool read_only
+);
+
 int32_t mako_vm_configure(MakoVMHandle* handle);
 void mako_vm_start(MakoVMHandle* handle, mako_vm_callback callback);
 void mako_vm_stop(MakoVMHandle* handle, mako_vm_callback callback);

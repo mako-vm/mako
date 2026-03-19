@@ -15,6 +15,8 @@ class MakoVMWrapper {
     let vsockControlPort: UInt32
     let vsockDockerPort: UInt32
     var lastError: String?
+    /// Shared directories to mount via VirtioFS (added before configure())
+    var sharedDirectories: [(tag: String, hostPath: String, readOnly: Bool)] = []
     /// Active vsock connections -- kept alive so the fds remain valid
     var vsockConnections: [VZVirtioSocketConnection] = []
     /// Queues for guest-initiated vsock connections (per port)
@@ -101,16 +103,31 @@ class MakoVMWrapper {
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         config.networkDevices = [networkDevice]
 
-        // VirtioFS: share macOS home directory into the VM
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let share = VZMultipleDirectoryShare(
-            directories: [
-                "home": VZSharedDirectory(url: homeDir, readOnly: false)
-            ]
-        )
-        let fsConfig = VZVirtioFileSystemDeviceConfiguration(tag: "mako-share")
-        fsConfig.share = share
-        config.directorySharingDevices = [fsConfig]
+        // VirtioFS shared directories
+        var sharingDevices: [VZVirtioFileSystemDeviceConfiguration] = []
+        if sharedDirectories.isEmpty {
+            // Default: share macOS home directory
+            let homeDir = FileManager.default.homeDirectoryForCurrentUser
+            let share = VZMultipleDirectoryShare(
+                directories: [
+                    "home": VZSharedDirectory(url: homeDir, readOnly: false)
+                ]
+            )
+            let fsConfig = VZVirtioFileSystemDeviceConfiguration(tag: "mako-share")
+            fsConfig.share = share
+            sharingDevices.append(fsConfig)
+        } else {
+            for dir in sharedDirectories {
+                let url = URL(fileURLWithPath: dir.hostPath)
+                let share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: url, readOnly: dir.readOnly)
+                )
+                let fsConfig = VZVirtioFileSystemDeviceConfiguration(tag: dir.tag)
+                fsConfig.share = share
+                sharingDevices.append(fsConfig)
+            }
+        }
+        config.directorySharingDevices = sharingDevices
 
         // Rosetta for x86 emulation on Apple Silicon
         #if arch(arm64)
@@ -227,6 +244,19 @@ func makoVMCreate(
         vsockDockerPort: vsockDockerPort
     )
     return Unmanaged.passRetained(wrapper).toOpaque()
+}
+
+@_cdecl("mako_vm_add_share")
+func makoVMAddShare(
+    handle: UnsafeMutableRawPointer,
+    tag: UnsafePointer<CChar>,
+    hostPath: UnsafePointer<CChar>,
+    readOnly: Bool
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let tagStr = String(cString: tag)
+    let pathStr = String(cString: hostPath)
+    wrapper.sharedDirectories.append((tag: tagStr, hostPath: pathStr, readOnly: readOnly))
 }
 
 @_cdecl("mako_vm_configure")

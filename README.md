@@ -116,25 +116,18 @@ vm-image/     Linux kernel, rootfs, and initramfs build scripts
 gui/MakoApp/  macOS menu bar application (SwiftUI)
 ```
 
-## Status
+## Features
 
-Mako is under active development. The core Docker workflow is functional:
-containers, images, volumes, networks, and Docker Compose all work through
-the standard `docker` CLI.
-
-**Working:**
-- VM boot/stop, Docker engine, all Docker CLI commands
-- Port forwarding (`-p` flags work on localhost)
-- VirtioFS file sharing (home directory)
-- Rosetta x86 emulation (Apple Silicon)
-- Menu bar GUI, launch at login, shell completions
-
-**Planned:**
-- Kubernetes (K3s) integration
-- DNS forwarding (container name resolution from macOS)
-- Dynamic memory ballooning
-- Configurable VirtioFS share paths
-- CI/CD and Homebrew distribution
+- **Docker**: full Docker CLI and Compose support via socket forwarding
+- **Port forwarding**: container `-p` ports accessible on `localhost`
+- **File sharing**: VirtioFS mounts (configurable, defaults to home directory)
+- **Kubernetes**: built-in K3s via `mako kubernetes enable`
+- **DNS**: resolve container names from macOS (`<name>.mako.local`)
+- **Rosetta**: x86 container support on Apple Silicon
+- **GUI**: native macOS menu bar app with container management
+- **CLI**: `mako ps`, `mako images`, `mako logs`, `mako exec`, `mako run`
+- **Launch at login**: launchd integration
+- **Shell completions**: zsh, bash, fish
 
 ## License
 
