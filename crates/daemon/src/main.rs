@@ -35,6 +35,9 @@ fn main() {
             cleanup_pid_file();
             std::process::exit(1);
         }
+        // run_daemon completed (shutdown finished), now safe to exit
+        info!("daemon shutdown complete, exiting");
+        unsafe { core_foundation::CFRunLoopStop(core_foundation::CFRunLoopGetMain()) };
     });
 
     unsafe { core_foundation::CFRunLoopRun() };
@@ -44,36 +47,39 @@ async fn run_daemon() -> Result<()> {
     let config = MakoConfig::load()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Spawn signal handler
-    let config_for_cleanup = config.clone();
+    // Spawn signal handler -- only sends shutdown signal; cleanup happens in run_daemon()
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
-        info!("shutdown signal received, cleaning up...");
+        info!("shutdown signal received");
         let _ = shutdown_tx.send(true);
-
-        // Clean up socket and PID file
-        if config_for_cleanup.docker_socket_path.exists() {
-            std::fs::remove_file(&config_for_cleanup.docker_socket_path).ok();
-            info!("removed docker socket");
-        }
-        cleanup_pid_file();
-        info!("mako daemon stopped");
-
-        // Stop the CFRunLoop so the process exits
-        unsafe { core_foundation::CFRunLoopStop(core_foundation::CFRunLoopGetMain()) };
     });
 
-    info!("booting Linux VM...");
     let vm_manager = Arc::new(vm::VmManager::new(config.clone())?);
 
-    let vm_handle = vm_manager.start_and_get_handle().await?;
+    // Try fast restore from saved VM state first
+    let vm_handle = if let Some(restored_handle) = vm_manager.start_from_saved().await? {
+        info!("VM restored from saved state (fast boot)");
 
-    let vsock_port = config.vsock_docker_port;
-    let vm_for_listen = vm_handle.clone();
-    tokio::task::spawn_blocking(move || vm_for_listen.vsock_listen(vsock_port)).await??;
-    info!(vsock_port, "vsock listener ready for guest connections");
+        let vsock_port = config.vsock_docker_port;
+        let vm_for_listen = restored_handle.clone();
+        tokio::task::spawn_blocking(move || vm_for_listen.vsock_listen(vsock_port)).await??;
+        info!(vsock_port, "vsock listener ready for guest connections");
 
-    vm_manager.wait_for_ready().await?;
+        restored_handle
+    } else {
+        info!("booting Linux VM (cold start)...");
+
+        let handle = vm_manager.start_and_get_handle().await?;
+
+        let vsock_port = config.vsock_docker_port;
+        let vm_for_listen = handle.clone();
+        tokio::task::spawn_blocking(move || vm_for_listen.vsock_listen(vsock_port)).await??;
+        info!(vsock_port, "vsock listener ready for guest connections");
+
+        vm_manager.wait_for_ready().await?;
+
+        handle
+    };
 
     info!("VM is ready, starting Docker socket proxy");
 
@@ -118,11 +124,26 @@ async fn run_daemon() -> Result<()> {
 
     proxy.run(shutdown_rx).await?;
 
-    // If we get here, shutdown was requested
-    info!("proxy stopped, requesting VM stop...");
-    if let Err(e) = vm_manager.stop().await {
-        warn!(?e, "VM stop error (may already be stopped)");
+    // If we get here, shutdown was requested -- try to save state for fast resume
+    info!("proxy stopped, saving VM state for fast resume...");
+    match vm_manager.stop_and_save().await {
+        Ok(true) => info!("VM state saved -- next start will be fast"),
+        Ok(false) => info!("VM stopped without saving (cold boot on next start)"),
+        Err(e) => {
+            warn!(?e, "VM save/stop error, forcing stop");
+            if let Err(e2) = vm_manager.stop().await {
+                warn!(?e2, "VM stop also failed (may already be stopped)");
+            }
+        }
     }
+
+    // Clean up socket and PID file
+    if config.docker_socket_path.exists() {
+        std::fs::remove_file(&config.docker_socket_path).ok();
+        info!("removed docker socket");
+    }
+    cleanup_pid_file();
+    info!("mako daemon stopped cleanly");
 
     Ok(())
 }

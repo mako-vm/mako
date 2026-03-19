@@ -23,6 +23,9 @@ enum Commands {
         /// Run in foreground (don't daemonize)
         #[arg(long, short)]
         foreground: bool,
+        /// Force a cold boot (discard saved VM state)
+        #[arg(long)]
+        cold: bool,
     },
     /// Stop the Mako VM
     Stop,
@@ -137,7 +140,8 @@ async fn main() -> anyhow::Result<()> {
             cpus,
             memory,
             foreground,
-        } => commands::start(cpus, memory, foreground).await,
+            cold,
+        } => commands::start(cpus, memory, foreground, cold).await,
         Commands::Stop => commands::stop().await,
         Commands::Status => commands::status().await,
         Commands::Setup => commands::setup().await,

@@ -61,6 +61,7 @@ class MakoVMWrapper {
         }
 
         let config = VZVirtualMachineConfiguration()
+        config.platform = VZGenericPlatformConfiguration()
         config.cpuCount = cpuCount
         config.memorySize = memoryBytes
         config.bootLoader = bootLoader
@@ -157,13 +158,22 @@ class MakoVMWrapper {
         return true
     }
 
-    func createAndStart(completion: @escaping (Bool, String?) -> Void) {
+    func createInstance() -> Bool {
         guard let config = self.vmConfig else {
-            completion(false, "VM not configured")
-            return
+            lastError = "VM not configured"
+            return false
         }
-
         self.vm = VZVirtualMachine(configuration: config)
+        return self.vm != nil
+    }
+
+    func createAndStart(completion: @escaping (Bool, String?) -> Void) {
+        if self.vm == nil {
+            guard createInstance() else {
+                completion(false, lastError ?? "Failed to create VZVirtualMachine")
+                return
+            }
+        }
 
         guard let vm = self.vm else {
             completion(false, "Failed to create VZVirtualMachine")
@@ -194,6 +204,95 @@ class MakoVMWrapper {
             completion(true, nil)
         } catch {
             completion(false, error.localizedDescription)
+        }
+    }
+
+    func forceStop(completion: @escaping (Bool, String?) -> Void) {
+        guard let vm = self.vm else {
+            completion(false, "VM not created")
+            return
+        }
+
+        vm.stop { error in
+            if let error = error {
+                completion(false, error.localizedDescription)
+            } else {
+                completion(true, nil)
+            }
+        }
+    }
+
+    func pause(completion: @escaping (Bool, String?) -> Void) {
+        guard let vm = self.vm else {
+            completion(false, "VM not created")
+            return
+        }
+        vm.pause { result in
+            switch result {
+            case .success:
+                completion(true, nil)
+            case .failure(let error):
+                completion(false, error.localizedDescription)
+            }
+        }
+    }
+
+    func resume(completion: @escaping (Bool, String?) -> Void) {
+        guard let vm = self.vm else {
+            completion(false, "VM not created")
+            return
+        }
+        vm.resume { result in
+            switch result {
+            case .success:
+                completion(true, nil)
+            case .failure(let error):
+                completion(false, error.localizedDescription)
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    func saveState(to path: String, completion: @escaping (Bool, String?) -> Void) {
+        guard let vm = self.vm else {
+            completion(false, "VM not created")
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        NSLog("mako: saveState called, vm.state=\(vm.state.rawValue), path=\(path)")
+        vm.saveMachineStateTo(url: url) { error in
+            if let error = error {
+                let nsError = error as NSError
+                let detail = "domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)"
+                NSLog("mako: saveState failed: \(detail)")
+                completion(false, detail)
+            } else {
+                NSLog("mako: saveState succeeded, vm.state=\(vm.state.rawValue)")
+                completion(true, nil)
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    func restoreState(from path: String, completion: @escaping (Bool, String?) -> Void) {
+        guard let vm = self.vm else {
+            completion(false, "VM not created")
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        let vmState = vm.state
+        NSLog("mako: restoreState called, vm.state=\(vmState.rawValue), path=\(path)")
+        vm.restoreMachineStateFrom(url: url) { error in
+            if let error = error {
+                let nsError = error as NSError
+                let detail = "domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)"
+                    + (nsError.userInfo.isEmpty ? "" : " userInfo=\(nsError.userInfo)")
+                NSLog("mako: restoreState failed: \(detail)")
+                completion(false, detail)
+            } else {
+                NSLog("mako: restoreState succeeded, vm.state=\(vm.state.rawValue)")
+                completion(true, nil)
+            }
         }
     }
 
@@ -273,6 +372,20 @@ func makoVMConfigure(handle: UnsafeMutableRawPointer) -> Int32 {
     return result
 }
 
+@_cdecl("mako_vm_create_instance")
+func makoVMCreateInstance(handle: UnsafeMutableRawPointer) -> Int32 {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    var result: Int32 = -1
+    if Thread.isMainThread {
+        result = wrapper.createInstance() ? 0 : -1
+    } else {
+        DispatchQueue.main.sync {
+            result = wrapper.createInstance() ? 0 : -1
+        }
+    }
+    return result
+}
+
 @_cdecl("mako_vm_start")
 func makoVMStart(
     handle: UnsafeMutableRawPointer,
@@ -315,6 +428,117 @@ func makoVMStop(
     } else {
         DispatchQueue.main.async { stopBlock() }
     }
+}
+
+@_cdecl("mako_vm_force_stop")
+func makoVMForceStop(
+    handle: UnsafeMutableRawPointer,
+    callback: @convention(c) (Bool, UnsafePointer<CChar>?) -> Void
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let block = {
+        wrapper.forceStop { success, errorMsg in
+            if let msg = errorMsg {
+                msg.withCString { ptr in callback(success, ptr) }
+            } else {
+                callback(success, nil)
+            }
+        }
+    }
+    if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
+}
+
+@_cdecl("mako_vm_pause")
+func makoVMPause(
+    handle: UnsafeMutableRawPointer,
+    callback: @convention(c) (Bool, UnsafePointer<CChar>?) -> Void
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let block = {
+        wrapper.pause { success, errorMsg in
+            if let msg = errorMsg {
+                msg.withCString { ptr in callback(success, ptr) }
+            } else {
+                callback(success, nil)
+            }
+        }
+    }
+    if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
+}
+
+@_cdecl("mako_vm_resume")
+func makoVMResume(
+    handle: UnsafeMutableRawPointer,
+    callback: @convention(c) (Bool, UnsafePointer<CChar>?) -> Void
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let block = {
+        wrapper.resume { success, errorMsg in
+            if let msg = errorMsg {
+                msg.withCString { ptr in callback(success, ptr) }
+            } else {
+                callback(success, nil)
+            }
+        }
+    }
+    if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
+}
+
+@_cdecl("mako_vm_save_state")
+func makoVMSaveState(
+    handle: UnsafeMutableRawPointer,
+    path: UnsafePointer<CChar>,
+    callback: @convention(c) (Bool, UnsafePointer<CChar>?) -> Void
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let pathStr = String(cString: path)
+    let block = {
+        if #available(macOS 14.0, *) {
+            wrapper.saveState(to: pathStr) { success, errorMsg in
+                if let msg = errorMsg {
+                    msg.withCString { ptr in callback(success, ptr) }
+                } else {
+                    callback(success, nil)
+                }
+            }
+        } else {
+            "VM state save requires macOS 14+".withCString { ptr in callback(false, ptr) }
+        }
+    }
+    if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
+}
+
+@_cdecl("mako_vm_restore_state")
+func makoVMRestoreState(
+    handle: UnsafeMutableRawPointer,
+    path: UnsafePointer<CChar>,
+    callback: @convention(c) (Bool, UnsafePointer<CChar>?) -> Void
+) {
+    let wrapper = Unmanaged<MakoVMWrapper>.fromOpaque(handle).takeUnretainedValue()
+    let pathStr = String(cString: path)
+    let block = {
+        if #available(macOS 14.0, *) {
+            wrapper.restoreState(from: pathStr) { success, errorMsg in
+                if let msg = errorMsg {
+                    msg.withCString { ptr in callback(success, ptr) }
+                } else {
+                    callback(success, nil)
+                }
+            }
+        } else {
+            "VM state restore requires macOS 14+".withCString { ptr in callback(false, ptr) }
+        }
+    }
+    if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
+}
+
+/// Returns true if macOS 14+ is available (supports save/restore).
+@_cdecl("mako_vm_supports_save_restore")
+func makoVMSupportsSaveRestore() -> Bool {
+    if #available(macOS 14.0, *) {
+        return true
+    }
+    return false
 }
 
 @_cdecl("mako_vm_is_running")

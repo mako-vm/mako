@@ -22,8 +22,23 @@ extern "C" {
         read_only: bool,
     );
     fn mako_vm_configure(handle: *mut c_void) -> i32;
+    fn mako_vm_create_instance(handle: *mut c_void) -> i32;
     fn mako_vm_start(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
     fn mako_vm_stop(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
+    fn mako_vm_force_stop(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
+    fn mako_vm_pause(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
+    fn mako_vm_resume(handle: *mut c_void, callback: extern "C" fn(bool, *const c_char));
+    fn mako_vm_save_state(
+        handle: *mut c_void,
+        path: *const c_char,
+        callback: extern "C" fn(bool, *const c_char),
+    );
+    fn mako_vm_restore_state(
+        handle: *mut c_void,
+        path: *const c_char,
+        callback: extern "C" fn(bool, *const c_char),
+    );
+    fn mako_vm_supports_save_restore() -> bool;
     fn mako_vm_is_running(handle: *mut c_void) -> bool;
     fn mako_vm_get_state(handle: *mut c_void) -> *const c_char;
     fn mako_vm_get_error(handle: *mut c_void) -> *const c_char;
@@ -124,12 +139,47 @@ impl VmHandle {
         Ok(())
     }
 
+    pub fn create_instance(&self) -> anyhow::Result<()> {
+        let ret = unsafe { mako_vm_create_instance(self.ptr) };
+        if ret != 0 {
+            let err = self.get_error().unwrap_or_else(|| "unknown error".into());
+            anyhow::bail!("VM instance creation failed: {err}");
+        }
+        Ok(())
+    }
+
     pub fn start(&self) -> anyhow::Result<()> {
         call_with_callback(|cb| unsafe { mako_vm_start(self.ptr, cb) })
     }
 
     pub fn stop(&self) -> anyhow::Result<()> {
         call_with_callback(|cb| unsafe { mako_vm_stop(self.ptr, cb) })
+    }
+
+    pub fn force_stop(&self) -> anyhow::Result<()> {
+        call_with_callback(|cb| unsafe { mako_vm_force_stop(self.ptr, cb) })
+    }
+
+    pub fn pause(&self) -> anyhow::Result<()> {
+        call_with_callback(|cb| unsafe { mako_vm_pause(self.ptr, cb) })
+    }
+
+    pub fn resume(&self) -> anyhow::Result<()> {
+        call_with_callback(|cb| unsafe { mako_vm_resume(self.ptr, cb) })
+    }
+
+    pub fn save_state(&self, path: &str) -> anyhow::Result<()> {
+        let c_path = CString::new(path)?;
+        call_with_callback(|cb| unsafe { mako_vm_save_state(self.ptr, c_path.as_ptr(), cb) })
+    }
+
+    pub fn restore_state(&self, path: &str) -> anyhow::Result<()> {
+        let c_path = CString::new(path)?;
+        call_with_callback(|cb| unsafe { mako_vm_restore_state(self.ptr, c_path.as_ptr(), cb) })
+    }
+
+    pub fn supports_save_restore() -> bool {
+        unsafe { mako_vm_supports_save_restore() }
     }
 
     pub fn is_running(&self) -> bool {

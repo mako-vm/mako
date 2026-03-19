@@ -32,8 +32,22 @@ void mako_vm_add_share(
 );
 
 int32_t mako_vm_configure(MakoVMHandle* handle);
+/* Create the VZVirtualMachine instance (without starting it). Needed for restore. */
+int32_t mako_vm_create_instance(MakoVMHandle* handle);
 void mako_vm_start(MakoVMHandle* handle, mako_vm_callback callback);
 void mako_vm_stop(MakoVMHandle* handle, mako_vm_callback callback);
+/* Forcefully stop the VM without waiting for guest to shut down (macOS 12+). */
+void mako_vm_force_stop(MakoVMHandle* handle, mako_vm_callback callback);
+void mako_vm_pause(MakoVMHandle* handle, mako_vm_callback callback);
+void mako_vm_resume(MakoVMHandle* handle, mako_vm_callback callback);
+
+/* Save/restore VM state to/from disk (macOS 14+ only). */
+void mako_vm_save_state(MakoVMHandle* handle, const char* path, mako_vm_callback callback);
+void mako_vm_restore_state(MakoVMHandle* handle, const char* path, mako_vm_callback callback);
+
+/* Returns true if the current macOS version supports save/restore. */
+bool mako_vm_supports_save_restore(void);
+
 bool mako_vm_is_running(MakoVMHandle* handle);
 const char* mako_vm_get_state(MakoVMHandle* handle);
 const char* mako_vm_get_error(MakoVMHandle* handle);

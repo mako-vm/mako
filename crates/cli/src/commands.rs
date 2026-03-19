@@ -2,7 +2,12 @@ use colored::Colorize;
 use mako_common::config::{mako_data_dir, MakoConfig};
 use std::process::Command;
 
-pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> anyhow::Result<()> {
+pub async fn start(
+    cpus: Option<u32>,
+    memory: Option<u32>,
+    foreground: bool,
+    cold: bool,
+) -> anyhow::Result<()> {
     let mut config = MakoConfig::load()?;
     if let Some(c) = cpus {
         config.vm.cpu_count = c;
@@ -25,7 +30,25 @@ pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> 
     // Stop any existing makod + VM XPC processes to avoid rootfs lock conflicts
     stop_existing_daemon();
 
+    // If --cold, discard any saved VM state to force a full boot
+    if cold {
+        let state_path = mako_data_dir().join("vm-state");
+        if state_path.exists() {
+            std::fs::remove_file(&state_path).ok();
+            println!(
+                "  {}",
+                "Discarded saved VM state (cold boot forced)".yellow()
+            );
+        }
+    }
+
+    let has_saved_state = mako_data_dir().join("vm-state").exists();
     println!("{}", "Starting Mako...".green().bold());
+    if has_saved_state {
+        println!("  Mode:   {}", "fast resume (saved state found)".green());
+    } else {
+        println!("  Mode:   {}", "cold boot".yellow());
+    }
     println!("  CPUs:   {}", config.vm.cpu_count.to_string().cyan());
     println!(
         "  Memory: {} GiB",
@@ -125,12 +148,22 @@ pub async fn stop() -> anyhow::Result<()> {
                 unsafe {
                     if libc::kill(pid, libc::SIGTERM) == 0 {
                         println!("  Sent SIGTERM to makod (PID {})", pid);
-                        // Wait up to 5s for graceful shutdown
-                        for _ in 0..50 {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        // Wait up to 30s for graceful shutdown (VM state save can take 10-15s)
+                        let mut exited = false;
+                        for i in 0..60 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
                             if libc::kill(pid, 0) != 0 {
+                                exited = true;
                                 break;
                             }
+                            if i == 5 {
+                                println!("  Saving VM state for fast resume...");
+                            }
+                        }
+                        if !exited {
+                            println!("  Daemon did not exit in time, force killing...");
+                            libc::kill(pid, libc::SIGKILL);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
                         }
                         stopped = true;
                     }
@@ -563,7 +596,7 @@ pub async fn docker_passthrough(args: &[&str]) -> anyhow::Result<()> {
 }
 
 fn stop_existing_daemon() {
-    // Kill makod via PID file
+    // Gracefully stop makod via PID file, giving it time to save VM state
     let pid_file = mako_data_dir().join("makod.pid");
     if pid_file.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
@@ -571,20 +604,26 @@ fn stop_existing_daemon() {
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                // Wait up to 30 seconds for graceful shutdown (VM state save can take 10-15s)
+                let mut still_alive = true;
+                for i in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                     unsafe {
                         if libc::kill(pid, 0) != 0 {
+                            still_alive = false;
                             break;
                         }
                     }
-                }
-                // Force kill if still alive
-                unsafe {
-                    if libc::kill(pid, 0) == 0 {
-                        libc::kill(pid, libc::SIGKILL);
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    if i == 5 {
+                        eprintln!("Waiting for daemon to save VM state...");
                     }
+                }
+                if still_alive {
+                    eprintln!("Daemon did not exit in time, force killing...");
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
         }
@@ -592,6 +631,8 @@ fn stop_existing_daemon() {
     }
 
     // Also kill any stray makod processes not tracked by the PID file
+    let _ = Command::new("pkill").args(["-15", "-f", "makod"]).output();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     let _ = Command::new("pkill").args(["-9", "-f", "makod"]).output();
 
     // Kill lingering VM XPC helpers that hold the rootfs lock
@@ -706,5 +747,15 @@ mod tests {
     fn config_set_invalid_cpus_errors() {
         let mut config = MakoConfig::default();
         assert!(apply_config_key(&mut config, "vm.cpus", "not_a_number").is_err());
+    }
+
+    #[test]
+    fn cold_flag_removes_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("vm-state");
+        std::fs::write(&state_file, b"fake state").unwrap();
+        assert!(state_file.exists());
+        std::fs::remove_file(&state_file).unwrap();
+        assert!(!state_file.exists());
     }
 }

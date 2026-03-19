@@ -26,3 +26,6 @@ colored = { workspace = true }
 tabled = { workspace = true }
 chrono = { workspace = true }
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
