@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/adilhafeez/mako"
+repository = "https://github.com/mako-vm/mako"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

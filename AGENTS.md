@@ -3,7 +3,7 @@
 > Open-source Docker Desktop replacement for macOS, built on Apple's Virtualization.framework.
 > Stock `dockerd` (Moby) runs inside a minimal Alpine Linux VM; all Docker CLI/Compose commands work unchanged.
 
-Repository: https://github.com/adilhafeez/mako
+Repository: https://github.com/mako-vm/mako
 Platform: macOS 13+ only (Apple Silicon and Intel)
 Primary language: Rust, with a thin Swift FFI bridge for macOS framework calls
 License: Apache-2.0
