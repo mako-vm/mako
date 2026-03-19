@@ -22,6 +22,9 @@ pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> 
         std::process::exit(1);
     }
 
+    // Stop any existing makod + VM XPC processes to avoid rootfs lock conflicts
+    stop_existing_daemon();
+
     println!("{}", "Starting Mako...".green().bold());
     println!("  CPUs:   {}", config.vm.cpu_count.to_string().cyan());
     println!(
@@ -74,12 +77,20 @@ pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> 
             anyhow::bail!("makod exited with status: {status}");
         }
     } else {
+        let log_path = mako_data_dir().join("makod.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let stderr_file = log_file.try_clone()?;
+
         let child = Command::new(&makod_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(log_file)
+            .stderr(stderr_file)
             .spawn()?;
 
         println!("  PID:    {}", child.id().to_string().cyan());
+        println!("  Logs:   {}", log_path.display().to_string().cyan());
         println!();
         println!(
             "VM is starting. Use {} to check status.",
@@ -92,6 +103,10 @@ pub async fn start(cpus: Option<u32>, memory: Option<u32>, foreground: bool) -> 
                 config.docker_socket_path.display()
             )
             .yellow()
+        );
+        println!(
+            "View logs:     {}",
+            format!("tail -f {}", log_path.display()).yellow()
         );
     }
 
@@ -231,6 +246,32 @@ pub async fn setup() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn daemon_logs(follow: bool, tail: Option<&str>) -> anyhow::Result<()> {
+    let log_path = mako_data_dir().join("makod.log");
+    if !log_path.exists() {
+        eprintln!(
+            "{} No daemon log found at {}",
+            "Error:".red().bold(),
+            log_path.display()
+        );
+        eprintln!("Start the daemon first with {}", "mako start".cyan());
+        std::process::exit(1);
+    }
+
+    let mut args = vec![];
+    if follow {
+        args.push("-f".to_string());
+    }
+    if let Some(n) = tail {
+        args.push("-n".to_string());
+        args.push(n.to_string());
+    }
+    args.push(log_path.to_string_lossy().to_string());
+
+    let status = Command::new("tail").args(&args).status()?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 pub async fn info() -> anyhow::Result<()> {
     let config = MakoConfig::load()?;
     println!("{}", "Mako Info".bold());
@@ -258,6 +299,13 @@ pub async fn config_reset() -> anyhow::Result<()> {
 
 pub async fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
     let mut config = MakoConfig::load()?;
+    apply_config_key(&mut config, key, value)?;
+    config.save()?;
+    println!("{} = {}", key.cyan(), value.green());
+    Ok(())
+}
+
+fn apply_config_key(config: &mut MakoConfig, key: &str, value: &str) -> anyhow::Result<()> {
     match key {
         "vm.cpus" => config.vm.cpu_count = value.parse()?,
         "vm.memory" => {
@@ -270,7 +318,6 @@ pub async fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
         }
         "vm.rosetta" => config.vm.rosetta = value.parse()?,
         key if key.starts_with("vm.share.") => {
-            // vm.share.tag=/host/path or vm.share.tag=/host/path:ro
             let tag = key.strip_prefix("vm.share.").unwrap();
             let (path, read_only) = if value.ends_with(":ro") {
                 (value.trim_end_matches(":ro").to_string(), true)
@@ -289,8 +336,6 @@ pub async fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
         }
         other => anyhow::bail!("unknown config key: {other}"),
     }
-    config.save()?;
-    println!("{} = {}", key.cyan(), value.green());
     Ok(())
 }
 
@@ -517,6 +562,47 @@ pub async fn docker_passthrough(args: &[&str]) -> anyhow::Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+fn stop_existing_daemon() {
+    // Kill makod via PID file
+    let pid_file = mako_data_dir().join("makod.pid");
+    if pid_file.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                for _ in 0..30 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    unsafe {
+                        if libc::kill(pid, 0) != 0 {
+                            break;
+                        }
+                    }
+                }
+                // Force kill if still alive
+                unsafe {
+                    if libc::kill(pid, 0) == 0 {
+                        libc::kill(pid, libc::SIGKILL);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+            }
+        }
+        std::fs::remove_file(&pid_file).ok();
+    }
+
+    // Also kill any stray makod processes not tracked by the PID file
+    let _ = Command::new("pkill").args(["-9", "-f", "makod"]).output();
+
+    // Kill lingering VM XPC helpers that hold the rootfs lock
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "com.apple.Virtualization.VirtualMachine"])
+        .output();
+
+    // Brief pause for the OS to release file locks
+    std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
 fn find_workspace_root() -> anyhow::Result<std::path::PathBuf> {
     let mut dir = std::env::current_dir()?;
     loop {
@@ -526,5 +612,99 @@ fn find_workspace_root() -> anyhow::Result<std::path::PathBuf> {
         if !dir.pop() {
             anyhow::bail!("Could not find Mako workspace root");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_set_cpus() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.cpus", "16").unwrap();
+        assert_eq!(config.vm.cpu_count, 16);
+    }
+
+    #[test]
+    fn config_set_memory() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.memory", "8").unwrap();
+        assert_eq!(config.vm.memory_bytes, 8 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn config_set_disk() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.disk", "128").unwrap();
+        assert_eq!(config.vm.disk_size_bytes, 128 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn config_set_rosetta() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.rosetta", "false").unwrap();
+        assert!(!config.vm.rosetta);
+    }
+
+    #[test]
+    fn config_set_share_normal() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.share.data", "/Volumes/Data").unwrap();
+        let share = config
+            .vm
+            .shared_directories
+            .iter()
+            .find(|s| s.mount_tag == "data")
+            .unwrap();
+        assert_eq!(
+            share.host_path,
+            Some(std::path::PathBuf::from("/Volumes/Data"))
+        );
+        assert!(!share.read_only);
+    }
+
+    #[test]
+    fn config_set_share_read_only() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.share.backup", "/mnt/backup:ro").unwrap();
+        let share = config
+            .vm
+            .shared_directories
+            .iter()
+            .find(|s| s.mount_tag == "backup")
+            .unwrap();
+        assert_eq!(
+            share.host_path,
+            Some(std::path::PathBuf::from("/mnt/backup"))
+        );
+        assert!(share.read_only);
+    }
+
+    #[test]
+    fn config_set_share_replaces_existing() {
+        let mut config = MakoConfig::default();
+        apply_config_key(&mut config, "vm.share.data", "/old").unwrap();
+        apply_config_key(&mut config, "vm.share.data", "/new").unwrap();
+        let matches: Vec<_> = config
+            .vm
+            .shared_directories
+            .iter()
+            .filter(|s| s.mount_tag == "data")
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].host_path, Some(std::path::PathBuf::from("/new")));
+    }
+
+    #[test]
+    fn config_set_unknown_key_errors() {
+        let mut config = MakoConfig::default();
+        assert!(apply_config_key(&mut config, "vm.foobar", "123").is_err());
+    }
+
+    #[test]
+    fn config_set_invalid_cpus_errors() {
+        let mut config = MakoConfig::default();
+        assert!(apply_config_key(&mut config, "vm.cpus", "not_a_number").is_err());
     }
 }

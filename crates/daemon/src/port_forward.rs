@@ -10,21 +10,21 @@ use tracing::{debug, info, warn};
 use crate::ffi::VmHandle;
 
 #[derive(Debug, Deserialize)]
-struct ContainerListEntry {
+pub(crate) struct ContainerListEntry {
     #[serde(rename = "Id")]
-    id: String,
+    pub(crate) id: String,
     #[serde(rename = "Ports")]
-    ports: Vec<PortEntry>,
+    pub(crate) ports: Vec<PortEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PortEntry {
+pub(crate) struct PortEntry {
     #[serde(rename = "PublicPort")]
-    public_port: Option<u16>,
+    pub(crate) public_port: Option<u16>,
     #[serde(rename = "PrivatePort")]
-    private_port: u16,
+    pub(crate) private_port: u16,
     #[serde(rename = "Type")]
-    port_type: String,
+    pub(crate) port_type: String,
 }
 
 struct ActiveForward {
@@ -265,4 +265,110 @@ fn forward_connection(client: TcpStream, vm_ip: &str, container_port: u16) -> Re
     let _ = t1.join();
     let _ = t2.join();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_CONTAINERS_JSON: &str = r#"[
+        {
+            "Id": "abc123",
+            "Ports": [
+                {"PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"},
+                {"PrivatePort": 443, "Type": "tcp"}
+            ]
+        },
+        {
+            "Id": "def456",
+            "Ports": [
+                {"PrivatePort": 6379, "PublicPort": 6379, "Type": "tcp"},
+                {"PrivatePort": 9999, "PublicPort": 9999, "Type": "udp"}
+            ]
+        },
+        {
+            "Id": "ghi789",
+            "Ports": []
+        }
+    ]"#;
+
+    #[test]
+    fn deserialize_container_list() {
+        let containers: Vec<ContainerListEntry> =
+            serde_json::from_str(SAMPLE_CONTAINERS_JSON).unwrap();
+        assert_eq!(containers.len(), 3);
+        assert_eq!(containers[0].id, "abc123");
+        assert_eq!(containers[0].ports.len(), 2);
+    }
+
+    #[test]
+    fn port_with_public_port() {
+        let containers: Vec<ContainerListEntry> =
+            serde_json::from_str(SAMPLE_CONTAINERS_JSON).unwrap();
+        let port = &containers[0].ports[0];
+        assert_eq!(port.public_port, Some(8080));
+        assert_eq!(port.private_port, 80);
+        assert_eq!(port.port_type, "tcp");
+    }
+
+    #[test]
+    fn port_without_public_port() {
+        let containers: Vec<ContainerListEntry> =
+            serde_json::from_str(SAMPLE_CONTAINERS_JSON).unwrap();
+        let port = &containers[0].ports[1];
+        assert!(port.public_port.is_none());
+        assert_eq!(port.private_port, 443);
+    }
+
+    #[test]
+    fn filter_tcp_ports_with_public() {
+        let containers: Vec<ContainerListEntry> =
+            serde_json::from_str(SAMPLE_CONTAINERS_JSON).unwrap();
+
+        let mut desired: HashMap<String, Vec<(u16, u16)>> = HashMap::new();
+        for c in &containers {
+            let mut port_pairs = Vec::new();
+            for p in &c.ports {
+                if let Some(pub_port) = p.public_port {
+                    if p.port_type == "tcp" {
+                        port_pairs.push((pub_port, p.private_port));
+                    }
+                }
+            }
+            if !port_pairs.is_empty() {
+                desired.insert(c.id.clone(), port_pairs);
+            }
+        }
+
+        // abc123: 8080->80 (tcp, has public) -- 443 filtered (no public)
+        assert_eq!(desired.get("abc123").unwrap(), &[(8080, 80)]);
+        // def456: 6379->6379 (tcp) -- 9999 filtered (udp)
+        assert_eq!(desired.get("def456").unwrap(), &[(6379, 6379)]);
+        // ghi789: no ports at all
+        assert!(!desired.contains_key("ghi789"));
+    }
+
+    #[test]
+    fn empty_containers_json() {
+        let containers: Vec<ContainerListEntry> = serde_json::from_str("[]").unwrap();
+        assert!(containers.is_empty());
+    }
+
+    #[test]
+    fn multiple_tcp_ports_one_container() {
+        let json = r#"[{
+            "Id": "multi",
+            "Ports": [
+                {"PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"},
+                {"PrivatePort": 443, "PublicPort": 8443, "Type": "tcp"}
+            ]
+        }]"#;
+        let containers: Vec<ContainerListEntry> = serde_json::from_str(json).unwrap();
+        let ports: Vec<_> = containers[0]
+            .ports
+            .iter()
+            .filter(|p| p.public_port.is_some() && p.port_type == "tcp")
+            .collect();
+        assert_eq!(ports.len(), 2);
+    }
 }

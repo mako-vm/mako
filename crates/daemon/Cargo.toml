@@ -32,3 +32,6 @@ bytes = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

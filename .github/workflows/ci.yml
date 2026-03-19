@@ -39,6 +39,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
+      - name: Test
+        run: cargo test --workspace
+
       - name: Check agent cross-compilation
         run: cargo check --target aarch64-unknown-linux-musl -p mako-agent
 

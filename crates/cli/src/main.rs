@@ -45,10 +45,13 @@ enum Commands {
     },
     /// List Docker images
     Images,
-    /// Show container logs
+    /// Show container logs (or daemon logs with --daemon)
     Logs {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (omit when using --daemon)
+        container: Option<String>,
+        /// Show makod daemon logs instead of container logs
+        #[arg(long)]
+        daemon: bool,
         /// Follow log output
         #[arg(long, short)]
         follow: bool,
@@ -157,21 +160,30 @@ async fn main() -> anyhow::Result<()> {
         Commands::Images => commands::docker_passthrough(&["images"]).await,
         Commands::Logs {
             container,
+            daemon,
             follow,
             tail,
         } => {
-            let mut args = vec!["logs"];
-            if follow {
-                args.push("-f");
+            if daemon {
+                commands::daemon_logs(follow, tail.as_deref()).await
+            } else {
+                let container = container.unwrap_or_else(|| {
+                    eprintln!("Error: container name required (or use --daemon for makod logs)");
+                    std::process::exit(1);
+                });
+                let mut args = vec!["logs"];
+                if follow {
+                    args.push("-f");
+                }
+                let tail_val;
+                if let Some(ref t) = tail {
+                    args.push("--tail");
+                    tail_val = t.clone();
+                    args.push(&tail_val);
+                }
+                args.push(&container);
+                commands::docker_passthrough(&args).await
             }
-            let tail_val;
-            if let Some(ref t) = tail {
-                args.push("--tail");
-                tail_val = t.clone();
-                args.push(&tail_val);
-            }
-            args.push(&container);
-            commands::docker_passthrough(&args).await
         }
         Commands::Exec {
             container,

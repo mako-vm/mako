@@ -162,12 +162,23 @@ cd gui/MakoApp && swift build -c release
 - **Agent communication**: reverse vsock (guest-initiated), CID 2, port 2375
 - **Half-close propagation**: always call `shutdown(fd, SHUT_WR)` when one side of a relay closes — failure to do this causes connection pool exhaustion with HTTP/1.1 keep-alive
 
+### Testing
+
+Every new feature or module **must** include tests:
+
+- **Unit tests**: add `#[cfg(test)] mod tests` inside the module. Test all pure logic — serde round-trips, parsing, validation, defaults, error paths. Unit tests must run without a VM or Docker daemon (`cargo test --workspace`).
+- **Integration tests**: for features requiring a running Mako instance, add shell scripts under `tests/` (see `tests/test-cli.sh` and `tests/test-compose.sh` for examples).
+- **Testability**: extract pure logic into standalone functions (e.g. `parse_*`, `build_*`, `apply_*`) that can be called from tests without side effects. Use `pub(crate)` visibility for internal functions that need test coverage.
+- **Dev dependencies**: use `tempfile` for filesystem tests (already in workspace). Add new dev deps to `[workspace.dependencies]` first, then reference with `{ workspace = true }`.
+- **CI**: `cargo test --workspace` runs on every push/PR in the `check` job. Do not merge code that breaks tests.
+- **Pre-commit**: `cargo test --workspace` runs as a pre-commit hook. All tests must pass before committing.
+
 ### Pre-commit Hooks
 
 Configured in `.pre-commit-config.yaml`:
 - `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-toml`
 - `check-merge-conflict`, `detect-private-key`, `check-added-large-files` (5MB limit)
-- `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo check --workspace`
+- `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo check --workspace`, `cargo test --workspace`
 
 ---
 

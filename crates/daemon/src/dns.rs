@@ -266,3 +266,132 @@ fn remove_resolver() {
         .args(["-n", "rm", "-f", "/etc/resolver/mako.local"])
         .output();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_dns_name(name: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for label in name.split('.') {
+            buf.push(label.len() as u8);
+            buf.extend_from_slice(label.as_bytes());
+        }
+        buf.push(0);
+        buf
+    }
+
+    fn make_dns_query(name: &str) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        // Header: ID=0xABCD, flags=standard query, QDCOUNT=1
+        pkt.extend_from_slice(&[0xAB, 0xCD]); // ID
+        pkt.extend_from_slice(&[0x01, 0x00]); // Flags
+        pkt.extend_from_slice(&[0x00, 0x01]); // QDCOUNT
+        pkt.extend_from_slice(&[0x00, 0x00]); // ANCOUNT
+        pkt.extend_from_slice(&[0x00, 0x00]); // NSCOUNT
+        pkt.extend_from_slice(&[0x00, 0x00]); // ARCOUNT
+                                              // Question
+        pkt.extend_from_slice(&encode_dns_name(name));
+        pkt.extend_from_slice(&[0x00, 0x01]); // QTYPE A
+        pkt.extend_from_slice(&[0x00, 0x01]); // QCLASS IN
+        pkt
+    }
+
+    // -- parse_dns_name tests --
+
+    #[test]
+    fn parse_single_label() {
+        let mut pkt = vec![0u8; 12]; // header
+        pkt.extend_from_slice(&encode_dns_name("test"));
+        assert_eq!(parse_dns_name(&pkt, 12), Some("test".to_string()));
+    }
+
+    #[test]
+    fn parse_multi_label() {
+        let mut pkt = vec![0u8; 12];
+        pkt.extend_from_slice(&encode_dns_name("nginx.mako.local"));
+        assert_eq!(
+            parse_dns_name(&pkt, 12),
+            Some("nginx.mako.local".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_empty_packet() {
+        let pkt = vec![0u8; 12];
+        // offset 12 is past end
+        assert_eq!(parse_dns_name(&pkt, 12), None);
+    }
+
+    #[test]
+    fn parse_truncated_packet() {
+        // Label says length 10 but only 3 bytes follow
+        let mut pkt = vec![0u8; 12];
+        pkt.push(10);
+        pkt.extend_from_slice(b"abc");
+        assert_eq!(parse_dns_name(&pkt, 12), None);
+    }
+
+    #[test]
+    fn parse_pointer_returns_none() {
+        let mut pkt = vec![0u8; 12];
+        pkt.push(0xC0); // pointer marker
+        pkt.push(0x00);
+        assert_eq!(parse_dns_name(&pkt, 12), None);
+    }
+
+    // -- build_dns_response tests --
+
+    #[test]
+    fn build_response_valid_ip() {
+        let query = make_dns_query("nginx.mako.local");
+        let response = build_dns_response(&query, "172.17.0.2").unwrap();
+
+        // Check header: same ID, response flags
+        assert_eq!(response[0], 0xAB);
+        assert_eq!(response[1], 0xCD);
+        assert_eq!(response[2], 0x81); // QR=1, RD=1
+        assert_eq!(response[3], 0x80); // RA=1
+
+        // Check answer contains the IP at the end
+        let len = response.len();
+        assert_eq!(&response[len - 4..], &[172, 17, 0, 2]);
+    }
+
+    #[test]
+    fn build_response_invalid_ip_returns_none() {
+        let query = make_dns_query("test.mako.local");
+        assert!(build_dns_response(&query, "not-an-ip").is_none());
+    }
+
+    #[test]
+    fn build_response_ipv6_returns_none() {
+        let query = make_dns_query("test.mako.local");
+        assert!(build_dns_response(&query, "::1").is_none());
+    }
+
+    // -- domain matching tests --
+
+    #[test]
+    fn mako_domain_suffix_matching() {
+        let name = "nginx.mako.local";
+        assert!(name.ends_with(MAKO_DOMAIN));
+
+        let name = "nginx.other.local";
+        assert!(!name.ends_with(MAKO_DOMAIN));
+    }
+
+    #[test]
+    fn extract_container_name() {
+        let name = "myapp.mako.local";
+        let container = name.strip_suffix(MAKO_DOMAIN).unwrap();
+        assert_eq!(container, "myapp");
+    }
+
+    #[test]
+    fn vm_is_special_case() {
+        let name = "vm.mako.local";
+        let container = name.strip_suffix(MAKO_DOMAIN).unwrap();
+        assert_eq!(container, "vm");
+    }
+}

@@ -37,4 +37,6 @@ chrono = { version = "0.4", features = ["serde"] }
 colored = "2"
 tabled = "0.16"
 
+tempfile = "3"
+
 mako-common = { path = "crates/common" }

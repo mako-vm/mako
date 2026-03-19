@@ -112,5 +112,76 @@ fn fetch_container_stats(socket_path: &std::path::Path, container_id: &str) -> O
     let body = response_str.split("\r\n\r\n").nth(1)?;
     let stats: serde_json::Value = serde_json::from_str(body).ok()?;
 
+    parse_memory_usage(&stats)
+}
+
+pub(crate) fn parse_memory_usage(stats: &serde_json::Value) -> Option<u64> {
     stats.get("memory_stats")?.get("usage")?.as_u64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_memory_stats() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "memory_stats": {
+                    "usage": 104857600,
+                    "max_usage": 209715200,
+                    "limit": 4294967296
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parse_memory_usage(&json), Some(104857600));
+    }
+
+    #[test]
+    fn parse_missing_memory_stats() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"cpu_stats": {}}"#).unwrap();
+        assert_eq!(parse_memory_usage(&json), None);
+    }
+
+    #[test]
+    fn parse_missing_usage_field() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"memory_stats": {"limit": 4294967296}}"#).unwrap();
+        assert_eq!(parse_memory_usage(&json), None);
+    }
+
+    #[test]
+    fn parse_zero_usage() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"memory_stats": {"usage": 0}}"#).unwrap();
+        assert_eq!(parse_memory_usage(&json), Some(0));
+    }
+
+    #[test]
+    fn parse_large_usage() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"memory_stats": {"usage": 17179869184}}"#).unwrap();
+        // 16 GiB
+        assert_eq!(parse_memory_usage(&json), Some(17179869184));
+    }
+
+    #[test]
+    fn memory_stats_default() {
+        let stats = MemoryStats::default();
+        assert_eq!(stats.vm_total_bytes, 0);
+        assert_eq!(stats.vm_available_bytes, 0);
+        assert_eq!(stats.containers_used_bytes, 0);
+    }
+
+    #[test]
+    fn memory_monitor_initial_stats() {
+        let monitor = MemoryMonitor::new(
+            std::path::PathBuf::from("/tmp/test.sock"),
+            4 * 1024 * 1024 * 1024,
+        );
+        let stats = monitor.stats.blocking_read();
+        assert_eq!(stats.vm_total_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(stats.containers_used_bytes, 0);
+    }
 }
