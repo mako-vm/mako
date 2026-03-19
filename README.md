@@ -7,25 +7,25 @@ Built on Apple's Virtualization.framework with stock dockerd running inside a mi
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│ macOS Host                              │
-│                                         │
-│  mako CLI ──┐    ┌── GUI (menu bar)    │
-│             ▼    ▼                      │
-│         ┌──────────────┐                │
+┌──────────────────────────────────────────┐
+│ macOS Host                               │
+│                                          │
+│    mako CLI ──┐    ┌── GUI (menu bar)    │
+│              ▼    ▼                      │
+│         ┌───────────────┐                │
 │         │    makod      │                │
 │         │  socket proxy │                │
 │         │  VM manager   │                │
-│         └──────┬───────┘                │
+│         └──────┬────────┘                │
 │                │ vsock                   │
-│         ┌──────▼───────┐                │
+│         ┌──────▼────────┐                │
 │         │  Linux VM     │                │
 │         │  mako-agent   │                │
 │         │  dockerd      │                │
 │         │  containerd   │                │
 │         │  runc         │                │
-│         └──────────────┘                │
-└─────────────────────────────────────────┘
+│         └───────────────┘                │
+└──────────────────────────────────────────┘
 ```
 
 ## How It Works
