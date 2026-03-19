@@ -80,6 +80,17 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-build-
 
+      - name: Install musl cross-compiler
+        run: brew install filosottile/musl-cross/musl-cross
+
+      - name: Configure musl linker
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-musl-gcc"
+          EOF
+
       - name: Build host binaries
         run: cargo build --release
 
