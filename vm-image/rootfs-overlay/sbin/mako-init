@@ -1,0 +1,157 @@
+#!/bin/sh
+# Mako VM init script - runs on every boot
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+echo "=== Mako VM booting ==="
+
+# Mount virtual filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mkdir -p /run/docker
+
+# Load kernel modules
+echo "Loading kernel modules..."
+depmod -a 2>&1 || echo "depmod failed"
+
+for mod in virtio_mmio virtio_blk virtio_net af_packet \
+    vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport \
+    ip_tables iptable_filter iptable_nat nf_nat nf_conntrack \
+    xt_conntrack xt_addrtype xt_MASQUERADE \
+    bridge veth overlay fuse virtiofs; do
+    if ! modprobe "$mod" 2>&1; then
+        echo "  FAIL: $mod"
+    fi
+done
+echo "Loaded modules:"
+lsmod 2>/dev/null | head -30
+echo "VirtIO devices:"
+ls /sys/bus/virtio/devices/ 2>/dev/null
+for dev in /sys/bus/virtio/devices/virtio*; do
+    [ -f "$dev/device" ] && echo "  $(basename $dev): device=$(cat $dev/device) driver=$(basename $(readlink $dev/driver 2>/dev/null) 2>/dev/null)"
+done
+echo "vsock local CID: $(cat /sys/class/misc/vsock/local_cid 2>/dev/null || echo 'not available')"
+
+# Mount cgroups v2
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || {
+    mount -t tmpfs cgroup /sys/fs/cgroup
+    for subsys in cpuset cpu cpuacct blkio memory devices freezer pids; do
+        mkdir -p /sys/fs/cgroup/$subsys
+        mount -t cgroup -o $subsys cgroup /sys/fs/cgroup/$subsys 2>/dev/null || true
+    done
+}
+
+# Enable IP forwarding (needed for Docker container networking)
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
+
+# Set hostname
+hostname mako-vm
+echo "mako-vm" > /etc/hostname
+
+# Bring up loopback
+ip link set lo up
+
+# Bring up eth0 with DHCP (wait for interface to appear)
+count=0
+while [ ! -d /sys/class/net/eth0 ] && [ $count -lt 20 ]; do
+    sleep 0.1
+    count=$((count + 1))
+done
+
+if [ -d /sys/class/net/eth0 ]; then
+    ip link set eth0 up
+    udhcpc -i eth0 -b -q -p /run/udhcpc.pid 2>/dev/null
+    echo "Network: eth0 up"
+else
+    echo "WARNING: eth0 not found, network unavailable"
+fi
+
+# Mount VirtioFS shared directory from macOS host
+mount -t virtiofs mako-share /mnt/host 2>/dev/null && \
+    echo "VirtioFS mounted at /mnt/host" || \
+    echo "VirtioFS mount skipped (not available)"
+
+# Start dockerd
+echo "Starting dockerd..."
+/usr/bin/dockerd \
+    -H unix:///var/run/docker.sock \
+    --storage-driver overlay2 \
+    --iptables=true \
+    --userland-proxy=false \
+    --log-level info \
+    > /var/log/dockerd.log 2>&1 &
+
+# Wait for dockerd to be ready (up to 30 seconds)
+for i in $(seq 1 300); do
+    if [ -S /var/run/docker.sock ]; then
+        echo "dockerd is ready"
+        break
+    fi
+    sleep 0.1
+done
+
+if [ ! -S /var/run/docker.sock ]; then
+    echo "WARNING: dockerd failed to start within 30 seconds"
+    cat /var/log/dockerd.log 2>/dev/null | tail -20
+fi
+
+# Start mako-agent (vsock relay: host can reach dockerd via vsock port 2375)
+if [ -x /usr/bin/mako-agent ]; then
+    /usr/bin/mako-agent >/dev/console 2>&1 &
+    AGENT_PID=$!
+    sleep 0.5
+    if kill -0 $AGENT_PID 2>/dev/null; then
+        echo "mako-agent running (PID=$AGENT_PID)"
+    else
+        echo "ERROR: mako-agent exited immediately"
+        wait $AGENT_PID 2>/dev/null
+        echo "mako-agent exit code: $?"
+    fi
+else
+    echo "ERROR: /usr/bin/mako-agent not found"
+    ls -la /usr/bin/mako-agent 2>&1
+fi
+
+# Print VM IP for host discovery (makod parses this from serial output)
+IP=$(ip -4 addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print $2}')
+echo "MAKO_VM_IP=${IP}"
+echo "MAKO_VM_READY"
+echo "=== Mako VM ready ==="
+
+# Keep init alive and monitor dockerd via PID file
+while true; do
+    DOCKER_PID=$(cat /var/run/docker.pid 2>/dev/null)
+    if [ -n "$DOCKER_PID" ] && kill -0 "$DOCKER_PID" 2>/dev/null; then
+        : # dockerd is alive
+    else
+        echo "WARNING: dockerd not running (pid=$DOCKER_PID)"
+        echo "--- dockerd log (last 20 lines) ---"
+        tail -20 /var/log/dockerd.log 2>/dev/null
+        echo "--- end dockerd log ---"
+        rm -f /var/run/docker.sock /var/run/docker.pid
+        /usr/bin/dockerd \
+            -H unix:///var/run/docker.sock \
+            --storage-driver overlay2 \
+            --iptables=true \
+            --userland-proxy=false \
+            --log-level info \
+            > /var/log/dockerd.log 2>&1 &
+        for i in $(seq 1 100); do
+            [ -S /var/run/docker.sock ] && break
+            sleep 0.1
+        done
+        if [ -S /var/run/docker.sock ]; then
+            echo "dockerd restarted successfully"
+        else
+            echo "dockerd failed to restart"
+            tail -20 /var/log/dockerd.log 2>/dev/null
+        fi
+    fi
+    sleep 10
+done

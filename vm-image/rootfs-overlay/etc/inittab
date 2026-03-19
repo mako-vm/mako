@@ -1,0 +1,3 @@
+::sysinit:/sbin/mako-init
+::respawn:/sbin/getty 38400 hvc0
+::shutdown:/bin/umount -a -r

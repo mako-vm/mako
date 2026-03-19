@@ -1,0 +1,36 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Swift
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# VM image build artifacts
+vm-image/output/
+vm-image/kernel/*.bzImage
+vm-image/rootfs/*.ext4
+vm-image/rootfs/*.squashfs
+vm-image/initrd/*.cpio
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+test-vm

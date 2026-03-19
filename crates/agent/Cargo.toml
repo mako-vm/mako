@@ -1,0 +1,13 @@
+[package]
+name = "mako-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mako guest agent -- vsock relay to Docker socket inside the Linux VM"
+
+[[bin]]
+name = "mako-agent"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
