@@ -684,8 +684,9 @@ mod tests {
     #[test]
     fn config_set_rosetta() {
         let mut config = MakoConfig::default();
-        apply_config_key(&mut config, "vm.rosetta", "false").unwrap();
         assert!(!config.vm.rosetta);
+        apply_config_key(&mut config, "vm.rosetta", "true").unwrap();
+        assert!(config.vm.rosetta);
     }
 
     #[test]

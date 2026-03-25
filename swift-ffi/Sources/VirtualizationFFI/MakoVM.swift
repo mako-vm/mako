@@ -74,12 +74,14 @@ class MakoVMWrapper {
         )
         config.serialPorts = [serialPort]
 
-        // Root filesystem block device
+        // Root filesystem block device with write-back caching for performance
         do {
             let diskURL = URL(fileURLWithPath: rootfsPath)
             let diskAttachment = try VZDiskImageStorageDeviceAttachment(
                 url: diskURL,
-                readOnly: false
+                readOnly: false,
+                cachingMode: .automatic,
+                synchronizationMode: .none
             )
             config.storageDevices = [
                 VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
@@ -133,15 +135,20 @@ class MakoVMWrapper {
         // Rosetta for x86 emulation on Apple Silicon
         #if arch(arm64)
         if rosetta {
-            if #available(macOS 13.0, *),
-               VZLinuxRosettaDirectoryShare.availability == .installed {
-                do {
-                    let rosettaShare = try VZLinuxRosettaDirectoryShare()
-                    let rosettaConfig = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
-                    rosettaConfig.share = rosettaShare
-                    config.directorySharingDevices.append(rosettaConfig)
-                } catch {
-                    lastError = "Rosetta setup failed (non-fatal): \(error.localizedDescription)"
+            if #available(macOS 13.0, *) {
+                let avail = VZLinuxRosettaDirectoryShare.availability
+                if avail == .installed {
+                    do {
+                        let rosettaShare = try VZLinuxRosettaDirectoryShare()
+                        let rosettaConfig = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+                        rosettaConfig.share = rosettaShare
+                        config.directorySharingDevices.append(rosettaConfig)
+                        NSLog("mako: Rosetta VirtioFS share added (x86_64 emulation)")
+                    } catch {
+                        lastError = "Rosetta setup failed (non-fatal): \(error.localizedDescription)"
+                    }
+                } else {
+                    NSLog("mako: Rosetta not available (status: \(avail)), x86_64 images will not work. Install with: softwareupdate --install-rosetta")
                 }
             }
         }

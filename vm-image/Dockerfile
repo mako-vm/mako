@@ -58,7 +58,7 @@ RUN cp /boot/vmlinuz-virt /output/vmlinuz
 RUN KVER=$(ls /lib/modules/ | head -1) && \
     mkinitfs -b / -k -o /output/initramfs.cpio.gz "$KVER"
 
-# Create ext4 rootfs image (2GB sparse)
-RUN mke2fs -t ext4 -d /rootfs -L mako-rootfs /output/rootfs.img 2G
+# Create ext4 rootfs image (64GB sparse -- actual disk use is much smaller)
+RUN mke2fs -t ext4 -d /rootfs -L mako-rootfs /output/rootfs.img 64G
 
 CMD ["echo", "Build complete. Copy artifacts from /output/"]

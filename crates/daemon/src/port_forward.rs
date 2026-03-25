@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -55,15 +55,41 @@ impl PortForwarder {
     }
 
     pub async fn run(self: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) {
-        info!("port forwarder: starting, polling every 2s");
+        info!("port forwarder: starting (event-driven + 5s fallback poll)");
 
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        // Longer fallback interval since events handle the fast path
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+        // Spawn a Docker events watcher that triggers immediate sync
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<()>(16);
+        let event_socket = self.socket_path.clone();
+        let mut event_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = event_shutdown.changed() => break,
+                    result = watch_docker_events(&event_socket) => {
+                        if result.is_ok() {
+                            event_tx.send(()).await.ok();
+                        } else {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+            }
+        });
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = self.sync_forwards().await {
                         debug!(?e, "port forward sync error");
+                    }
+                }
+                _ = event_rx.recv() => {
+                    debug!("port forward: Docker event received, syncing");
+                    if let Err(e) = self.sync_forwards().await {
+                        debug!(?e, "port forward sync error (event-triggered)");
                     }
                 }
                 _ = shutdown_rx.changed() => {
@@ -97,7 +123,6 @@ impl PortForwarder {
 
         let mut forwards = self.forwards.lock().await;
 
-        // Remove forwards for containers that no longer need them
         let stale_ids: Vec<String> = forwards
             .keys()
             .filter(|id| !desired.contains_key(*id))
@@ -112,7 +137,6 @@ impl PortForwarder {
             }
         }
 
-        // Add forwards for new containers
         let vm_ip = self.vm_ip.read().await.clone();
         let Some(vm_ip) = vm_ip else { return Ok(()) };
 
@@ -126,8 +150,6 @@ impl PortForwarder {
                 let ip = vm_ip.clone();
                 info!(host_port, "port forward: adding");
 
-                // Docker binds PublicPort on 0.0.0.0 inside the VM, so we
-                // connect to vm_ip:host_port (not the container's internal port).
                 let vm_port = host_port;
                 tokio::spawn(async move {
                     if let Err(e) = run_tcp_forward(host_port, ip, vm_port, rx).await {
@@ -158,6 +180,7 @@ impl PortForwarder {
     async fn list_containers(&self) -> Result<Vec<ContainerListEntry>> {
         let socket_path = self.socket_path.clone();
         tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
             let stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
             let mut stream = stream;
             let req = "GET /containers/json HTTP/1.0\r\nHost: localhost\r\n\r\n";
@@ -177,15 +200,45 @@ impl PortForwarder {
     }
 }
 
+/// Watch Docker events stream for container start/stop/die events.
+/// Returns Ok(()) whenever a relevant event is received so the caller can sync.
+async fn watch_docker_events(socket_path: &std::path::Path) -> Result<()> {
+    let path = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let stream = std::os::unix::net::UnixStream::connect(&path)?;
+        stream.set_read_timeout(None)?;
+        let mut stream_w = stream.try_clone()?;
+        let req = "GET /events?filters=%7B%22type%22%3A%5B%22container%22%5D%7D HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        stream_w.write_all(req.as_bytes())?;
+        stream_w.flush()?;
+
+        let reader = BufReader::new(stream);
+        let mut past_headers = false;
+        for line in reader.lines() {
+            let line = line?;
+            if !past_headers {
+                if line.is_empty() {
+                    past_headers = true;
+                }
+                continue;
+            }
+            if line.contains("\"start\"") || line.contains("\"die\"") || line.contains("\"stop\"") {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("events stream ended");
+    })
+    .await?
+}
+
 async fn run_tcp_forward(
     host_port: u16,
     vm_ip: String,
     container_port: u16,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let addr: SocketAddr = format!("127.0.0.1:{host_port}").parse()?;
-    let listener = TcpListener::bind(addr)?;
-    listener.set_nonblocking(true)?;
+    let listener = TcpListener::bind(format!("127.0.0.1:{host_port}")).await?;
 
     info!(
         host_port,
@@ -194,76 +247,38 @@ async fn run_tcp_forward(
 
     loop {
         tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((mut client, _addr)) => {
+                        let ip = vm_ip.clone();
+                        tokio::spawn(async move {
+                            client.set_nodelay(true).ok();
+                            match tokio::net::TcpStream::connect(format!("{ip}:{container_port}")).await {
+                                Ok(mut upstream) => {
+                                    upstream.set_nodelay(true).ok();
+                                    let result = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                                    debug!(?result, host_port, "port forward: session ended");
+                                }
+                                Err(e) => {
+                                    debug!(?e, "port forward: upstream connect failed");
+                                    client.shutdown().await.ok();
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!(?e, host_port, "port forward: accept error");
+                    }
+                }
+            }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     debug!(host_port, "port forward: stopping listener");
                     break;
                 }
             }
-            result = tokio::task::spawn_blocking({
-                let listener = listener.try_clone()?;
-                move || -> Option<TcpStream> {
-                    listener.set_nonblocking(false).ok();
-                    // Short timeout so we can check shutdown
-                    listener.set_nonblocking(true).ok();
-                    match listener.accept() {
-                        Ok((stream, _)) => Some(stream),
-                        Err(_) => None,
-                    }
-                }
-            }) => {
-                if let Ok(Some(client)) = result {
-                    let vm_ip = vm_ip.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = forward_connection(client, &vm_ip, container_port) {
-                            debug!(?e, "port forward connection error");
-                        }
-                    });
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            }
         }
     }
-    Ok(())
-}
-
-fn forward_connection(client: TcpStream, vm_ip: &str, container_port: u16) -> Result<()> {
-    let upstream = TcpStream::connect(format!("{vm_ip}:{container_port}"))?;
-
-    let mut client_r = client.try_clone()?;
-    let mut upstream_w = upstream.try_clone()?;
-    let mut upstream_r = upstream;
-    let mut client_w = client;
-
-    let t1 = std::thread::spawn(move || -> std::io::Result<()> {
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = client_r.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            upstream_w.write_all(&buf[..n])?;
-        }
-        upstream_w.shutdown(std::net::Shutdown::Write)?;
-        Ok(())
-    });
-
-    let t2 = std::thread::spawn(move || -> std::io::Result<()> {
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = upstream_r.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            client_w.write_all(&buf[..n])?;
-        }
-        client_w.shutdown(std::net::Shutdown::Write)?;
-        Ok(())
-    });
-
-    let _ = t1.join();
-    let _ = t2.join();
     Ok(())
 }
 
@@ -340,11 +355,8 @@ mod tests {
             }
         }
 
-        // abc123: 8080->80 (tcp, has public) -- 443 filtered (no public)
         assert_eq!(desired.get("abc123").unwrap(), &[(8080, 80)]);
-        // def456: 6379->6379 (tcp) -- 9999 filtered (udp)
         assert_eq!(desired.get("def456").unwrap(), &[(6379, 6379)]);
-        // ghi789: no ports at all
         assert!(!desired.contains_key("ghi789"));
     }
 

@@ -15,6 +15,9 @@ mount -t tmpfs tmpfs /tmp
 mount -t tmpfs tmpfs /run
 mkdir -p /run/docker
 
+# Remount root with noatime to reduce unnecessary disk writes
+mount -o remount,noatime,nodiratime / 2>/dev/null || true
+
 # Load kernel modules
 echo "Loading kernel modules..."
 depmod -a 2>&1 || echo "depmod failed"
@@ -72,19 +75,77 @@ else
     echo "WARNING: eth0 not found, network unavailable"
 fi
 
+# Discover IP and gateway right after DHCP so all subsequent config can use them
+IP=$(ip -4 addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print $2}')
+GATEWAY=$(ip route show default 2>/dev/null | awk '/default/ {print $3}')
+
 # Mount VirtioFS shared directory from macOS host
 mount -t virtiofs mako-share /mnt/host 2>/dev/null && \
     echo "VirtioFS mounted at /mnt/host" || \
     echo "VirtioFS mount skipped (not available)"
 
-# Start dockerd
+# Mount Apple Rosetta for x86_64 emulation on Apple Silicon.
+# The host exposes Rosetta as a VirtioFS share tagged "rosetta".
+mkdir -p /mnt/rosetta
+if mount -t virtiofs rosetta /mnt/rosetta 2>/dev/null; then
+    # Register Rosetta as the binfmt handler for x86_64 ELF binaries
+    mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+    if [ -d /proc/sys/fs/binfmt_misc ]; then
+        echo ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/mnt/rosetta/rosetta:OCF' \
+            > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+            echo "Rosetta: x86_64 emulation enabled" || \
+            echo "Rosetta: binfmt registration failed"
+    fi
+else
+    echo "Rosetta: not available (VirtioFS share not found)"
+fi
+
+# Configure DNS to use the host gateway where makod runs a VPN-aware DNS proxy.
+if [ -n "$GATEWAY" ]; then
+    cat > /etc/resolv.conf <<DNSEOF
+nameserver ${GATEWAY}
+nameserver 8.8.8.8
+options timeout:2 attempts:1
+DNSEOF
+    # makod's DNS proxy binds to a high port (10053) since port 53 needs root
+    # on macOS. DNAT transparently redirects port 53 -> 10053.
+    iptables -t nat -A OUTPUT -p udp -d ${GATEWAY} --dport 53 \
+        -j DNAT --to-destination ${GATEWAY}:10053 2>/dev/null || true
+    iptables -t nat -A OUTPUT -p tcp -d ${GATEWAY} --dport 53 \
+        -j DNAT --to-destination ${GATEWAY}:10053 2>/dev/null || true
+    echo "DNS: using host gateway ${GATEWAY} (VPN-aware proxy, DNAT 53->10053)"
+else
+    echo "DNS: no gateway found, keeping default resolvers"
+fi
+
+# Configure Docker to use the host HTTP CONNECT proxy for VPN access.
+# makod runs the proxy on gateway:3128 so Docker can reach internal registries.
+if [ -n "$GATEWAY" ]; then
+    export HTTP_PROXY="http://${GATEWAY}:3128"
+    export HTTPS_PROXY="http://${GATEWAY}:3128"
+    export NO_PROXY="127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    echo "Docker proxy: http://${GATEWAY}:3128"
+fi
+
+# Configure Docker daemon for performance
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<'DOCKERCFG'
+{
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "max-concurrent-downloads": 10,
+  "max-concurrent-uploads": 5
+}
+DOCKERCFG
+
+# Start dockerd (inherits HTTP_PROXY/HTTPS_PROXY from environment)
 echo "Starting dockerd..."
 /usr/bin/dockerd \
     -H unix:///var/run/docker.sock \
-    --storage-driver overlay2 \
     --iptables=true \
     --userland-proxy=false \
-    --log-level info \
+    --log-level warn \
     > /var/log/dockerd.log 2>&1 &
 
 # Wait for dockerd to be ready (up to 30 seconds)
@@ -118,9 +179,9 @@ else
     ls -la /usr/bin/mako-agent 2>&1
 fi
 
-# Print VM IP for host discovery (makod parses this from serial output)
-IP=$(ip -4 addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print $2}')
+# Print VM IP and gateway for host discovery (makod parses these from serial output)
 echo "MAKO_VM_IP=${IP}"
+echo "MAKO_VM_GATEWAY=${GATEWAY}"
 echo "MAKO_VM_READY"
 echo "=== Mako VM ready ==="
 
@@ -135,6 +196,7 @@ while true; do
         tail -20 /var/log/dockerd.log 2>/dev/null
         echo "--- end dockerd log ---"
         rm -f /var/run/docker.sock /var/run/docker.pid
+        HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" NO_PROXY="${NO_PROXY}" \
         /usr/bin/dockerd \
             -H unix:///var/run/docker.sock \
             --storage-driver overlay2 \

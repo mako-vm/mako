@@ -14,6 +14,7 @@ pub struct VmManager {
     handle: Arc<RwLock<Option<VmHandle>>>,
     handle_arc: Arc<RwLock<Option<Arc<VmHandle>>>>,
     vm_ip: Arc<RwLock<Option<String>>>,
+    vm_gateway: Arc<RwLock<Option<String>>>,
 }
 
 #[allow(dead_code)]
@@ -25,6 +26,7 @@ impl VmManager {
             handle: Arc::new(RwLock::new(None)),
             handle_arc: Arc::new(RwLock::new(None)),
             vm_ip: Arc::new(RwLock::new(None)),
+            vm_gateway: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -122,6 +124,7 @@ impl VmManager {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("VM not started"))?;
         let vm_ip_writer = self.vm_ip.clone();
+        let vm_gateway_writer = self.vm_gateway.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             let serial_fd = handle.serial_read_fd();
@@ -147,6 +150,17 @@ impl VmManager {
                     }
                 }
 
+                if let Some(gw) = line.strip_prefix("MAKO_VM_GATEWAY=") {
+                    let gw = gw.trim().to_string();
+                    if !gw.is_empty() {
+                        info!(gateway = %gw, "discovered VM gateway");
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(async {
+                            *vm_gateway_writer.write().await = Some(gw);
+                        });
+                    }
+                }
+
                 if line.contains("MAKO_VM_READY") {
                     info!("VM init complete, dockerd should be ready");
                     std::thread::spawn(move || {
@@ -162,6 +176,17 @@ impl VmManager {
             Ok(())
         })
         .await??;
+
+        // If the guest didn't report a gateway, infer it from the VM IP.
+        // VZ NAT uses the first address in the subnet (typically x.x.x.1).
+        if self.vm_gateway.read().await.is_none() {
+            if let Some(ip) = self.vm_ip.read().await.clone() {
+                if let Some(inferred) = infer_gateway(&ip) {
+                    info!(gateway = %inferred, "inferred VM gateway from VM IP (guest didn't report it)");
+                    *self.vm_gateway.write().await = Some(inferred);
+                }
+            }
+        }
 
         *self.state.write().await = VmState::Running;
         info!("VM is running");
@@ -395,9 +420,27 @@ impl VmManager {
         self.vm_ip.clone()
     }
 
+    pub async fn vm_gateway(&self) -> Option<String> {
+        self.vm_gateway.read().await.clone()
+    }
+
+    pub fn vm_gateway_ref(&self) -> Arc<RwLock<Option<String>>> {
+        self.vm_gateway.clone()
+    }
+
     /// Take the VmHandle out wrapped in an Arc for sharing with the socket proxy.
     pub async fn take_handle_arc(&self) -> Option<Arc<VmHandle>> {
         self.handle.write().await.take().map(Arc::new)
+    }
+}
+
+/// Infer the NAT gateway from a VM IP by replacing the last octet with `.1`.
+pub(crate) fn infer_gateway(vm_ip: &str) -> Option<String> {
+    let parts: Vec<&str> = vm_ip.split('.').collect();
+    if parts.len() == 4 {
+        Some(format!("{}.{}.{}.1", parts[0], parts[1], parts[2]))
+    } else {
+        None
     }
 }
 
@@ -423,5 +466,20 @@ mod tests {
     #[test]
     fn vm_state_path_is_deterministic() {
         assert_eq!(vm_state_path(), vm_state_path());
+    }
+
+    #[test]
+    fn infer_gateway_from_vm_ip() {
+        assert_eq!(
+            infer_gateway("192.168.64.72"),
+            Some("192.168.64.1".to_string())
+        );
+        assert_eq!(infer_gateway("10.0.0.5"), Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn infer_gateway_invalid_ip() {
+        assert_eq!(infer_gateway("not-an-ip"), None);
+        assert_eq!(infer_gateway(""), None);
     }
 }

@@ -1,5 +1,6 @@
 mod dns;
 mod ffi;
+mod http_proxy;
 mod memory;
 mod port_forward;
 mod socket_proxy;
@@ -106,11 +107,22 @@ async fn run_daemon() -> Result<()> {
         port_fwd.run(port_fwd_shutdown).await;
     });
 
-    // Start DNS forwarder (resolves *.mako.local to container IPs)
-    let dns_fwd = dns::DnsForwarder::new(config.docker_socket_path.clone(), vm_manager.vm_ip_ref());
+    // Start DNS forwarder (*.mako.local on host + full VPN-aware proxy for VM)
+    let dns_fwd = dns::DnsForwarder::new(
+        config.docker_socket_path.clone(),
+        vm_manager.vm_ip_ref(),
+        vm_manager.vm_gateway_ref(),
+    );
     let dns_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         dns_fwd.run(dns_shutdown).await;
+    });
+
+    // Start HTTP CONNECT proxy (tunnels VPN traffic from VM through the host)
+    let http_proxy = http_proxy::HttpProxy::new(vm_manager.vm_gateway_ref());
+    let http_proxy_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        http_proxy.run(http_proxy_shutdown).await;
     });
 
     // Start memory monitor (tracks container memory usage)

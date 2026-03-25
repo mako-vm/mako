@@ -6,7 +6,7 @@ use std::time::Duration;
 const VSOCK_PORT: u32 = 2375;
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
 const HOST_CID: u32 = 2;
-const NUM_WORKERS: usize = 8;
+const NUM_WORKERS: usize = 32;
 
 fn main() {
     eprintln!("mako-agent: reverse vsock relay, {NUM_WORKERS} workers");
@@ -43,7 +43,7 @@ fn handle_connection(vsock_fd: RawFd) -> io::Result<()> {
     let mut vsock = unsafe { std::fs::File::from_raw_fd(vsock_fd) };
 
     // Block until host sends data (Docker client connected and sent request)
-    let mut first_buf = [0u8; 65536];
+    let mut first_buf = [0u8; 262144];
     let first_n = vsock.read(&mut first_buf)?;
     if first_n == 0 {
         return Ok(());
@@ -84,7 +84,7 @@ fn handle_connection(vsock_fd: RawFd) -> io::Result<()> {
     let mut vr = vsock;
     let mut dw = docker;
     let v2d = std::thread::spawn(move || -> io::Result<()> {
-        let mut buf = [0u8; 65536];
+        let mut buf = [0u8; 262144];
         loop {
             let n = vr.read(&mut buf)?;
             if n == 0 {
@@ -100,7 +100,7 @@ fn handle_connection(vsock_fd: RawFd) -> io::Result<()> {
     let mut dr = docker_r;
     let mut vw = vsock_w;
     let d2v = std::thread::spawn(move || -> io::Result<()> {
-        let mut buf = [0u8; 65536];
+        let mut buf = [0u8; 262144];
         loop {
             let n = dr.read(&mut buf)?;
             if n == 0 {

@@ -46,7 +46,7 @@ impl Default for VmConfig {
                 mount_tag: "home".into(),
                 read_only: false,
             }],
-            rosetta: cfg!(target_arch = "aarch64"),
+            rosetta: false,
         }
     }
 }

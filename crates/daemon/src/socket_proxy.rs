@@ -1,6 +1,5 @@
 use anyhow::Result;
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -9,11 +8,11 @@ use tracing::{debug, error, info};
 
 use crate::ffi::VmHandle;
 
-fn set_blocking(fd: i32) {
+fn set_nonblocking(fd: RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 && (flags & libc::O_NONBLOCK) != 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }
 }
@@ -80,87 +79,20 @@ async fn proxy_via_vsock(
     vm_handle: Arc<VmHandle>,
     port: u32,
 ) -> Result<()> {
-    // Accept the next guest-initiated vsock connection (blocks until one arrives)
     let fd = tokio::task::spawn_blocking(move || vm_handle.vsock_accept(port)).await??;
     info!(fd, "accepted guest vsock connection");
 
-    // Check fd type and force blocking mode
-    unsafe {
-        let mut stat: libc::stat = std::mem::zeroed();
-        libc::fstat(fd, &mut stat);
-        debug!(fd, mode = format!("{:#o}", stat.st_mode), "vsock fd fstat");
+    // Set non-blocking for tokio async I/O
+    set_nonblocking(fd);
 
-        let mut sock_type: libc::c_int = 0;
-        let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let r = libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_TYPE,
-            &mut sock_type as *mut _ as *mut libc::c_void,
-            &mut len,
-        );
-        debug!(fd, r, sock_type, "vsock fd SO_TYPE");
-    }
+    // Wrap the vsock fd as a UnixStream -- vsock is SOCK_STREAM so kqueue handles it fine
+    let vsock_std = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    let mut vsock = tokio::net::UnixStream::from_std(vsock_std)?;
 
-    set_blocking(fd);
+    let mut client = client;
 
-    let client_std = client.into_std()?;
-    set_blocking(client_std.as_raw_fd());
-
-    let vsock_fd = fd;
-    let client_fd = client_std.as_raw_fd();
-
-    let vsock_read = unsafe { std::fs::File::from_raw_fd(vsock_fd) };
-    let vsock_write = vsock_read.try_clone()?;
-    let client_read = client_std.try_clone()?;
-    let mut client_write = client_std;
-
-    let mut vw = vsock_write;
-    let mut cr = client_read;
-    let vsock_fd_c2v = vsock_fd;
-    let c2v = std::thread::spawn(move || -> std::io::Result<u64> {
-        let mut buf = [0u8; 65536];
-        let mut total = 0u64;
-        loop {
-            let n = cr.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            total += n as u64;
-            vw.write_all(&buf[..n])?;
-        }
-        unsafe {
-            libc::shutdown(vsock_fd_c2v, libc::SHUT_WR);
-        }
-        Ok(total)
-    });
-
-    let mut vr = vsock_read;
-    let client_fd_v2c = client_fd;
-    let c2c = std::thread::spawn(move || -> std::io::Result<u64> {
-        let mut buf = [0u8; 65536];
-        let mut total = 0u64;
-        loop {
-            let n = vr.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            total += n as u64;
-            client_write.write_all(&buf[..n])?;
-        }
-        unsafe {
-            libc::shutdown(client_fd_v2c, libc::SHUT_WR);
-        }
-        Ok(total)
-    });
-
-    let r1 = c2v
-        .join()
-        .map_err(|_| anyhow::anyhow!("c2v thread panicked"));
-    let r2 = c2c
-        .join()
-        .map_err(|_| anyhow::anyhow!("v2c thread panicked"));
-    debug!(?r1, ?r2, "proxy session ended");
+    let result = tokio::io::copy_bidirectional(&mut client, &mut vsock).await;
+    debug!(?result, "proxy session ended");
 
     Ok(())
 }
