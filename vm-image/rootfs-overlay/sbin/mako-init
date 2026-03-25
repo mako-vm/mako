@@ -26,7 +26,8 @@ for mod in virtio_mmio virtio_blk virtio_net af_packet \
     vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport \
     ip_tables iptable_filter iptable_nat nf_nat nf_conntrack \
     xt_conntrack xt_addrtype xt_MASQUERADE \
-    bridge veth overlay fuse virtiofs; do
+    nf_tables nft_chain_nat nft_compat \
+    bridge br_netfilter veth overlay fuse virtiofs; do
     if ! modprobe "$mod" 2>&1; then
         echo "  FAIL: $mod"
     fi
@@ -49,9 +50,16 @@ mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || {
     done
 }
 
-# Enable IP forwarding (needed for Docker container networking)
+# Enable IP forwarding and bridge netfilter (needed for Docker + Kubernetes)
 echo 1 > /proc/sys/net/ipv4/ip_forward
 echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
+echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || true
+echo 1 > /proc/sys/net/bridge/bridge-nf-call-ip6tables 2>/dev/null || true
+# Allow routing packets to 127.0.0.1 from external interfaces.
+# This lets the host port forwarder reach Docker ports bound to 127.0.0.1
+# (e.g., Kind's Kubernetes API server).
+echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet
+echo 1 > /proc/sys/net/ipv4/conf/eth0/route_localnet
 
 # Set hostname
 hostname mako-vm
@@ -125,6 +133,14 @@ if [ -n "$GATEWAY" ]; then
     export HTTPS_PROXY="http://${GATEWAY}:3128"
     export NO_PROXY="127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     echo "Docker proxy: http://${GATEWAY}:3128"
+
+    # PREROUTING DNAT: redirect incoming TCP from the host gateway to 127.0.0.1.
+    # Docker containers like Kind bind ports to 127.0.0.1 only. The host port
+    # forwarder connects to VM_IP:port, which won't reach 127.0.0.1-bound
+    # listeners. This rule, combined with route_localnet=1 and userland-proxy,
+    # lets those connections through.
+    iptables -t nat -I PREROUTING -i eth0 -s ${GATEWAY} -p tcp \
+        -j DNAT --to-destination 127.0.0.1 2>/dev/null || true
 fi
 
 # Configure Docker daemon for performance
@@ -144,7 +160,7 @@ echo "Starting dockerd..."
 /usr/bin/dockerd \
     -H unix:///var/run/docker.sock \
     --iptables=true \
-    --userland-proxy=false \
+    --userland-proxy=true \
     --log-level warn \
     > /var/log/dockerd.log 2>&1 &
 
@@ -201,7 +217,7 @@ while true; do
             -H unix:///var/run/docker.sock \
             --storage-driver overlay2 \
             --iptables=true \
-            --userland-proxy=false \
+            --userland-proxy=true \
             --log-level info \
             > /var/log/dockerd.log 2>&1 &
         for i in $(seq 1 100); do

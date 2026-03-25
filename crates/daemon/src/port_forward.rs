@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::copy;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -249,19 +249,22 @@ async fn run_tcp_forward(
         tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok((mut client, _addr)) => {
+                    Ok((client, _addr)) => {
                         let ip = vm_ip.clone();
                         tokio::spawn(async move {
                             client.set_nodelay(true).ok();
                             match tokio::net::TcpStream::connect(format!("{ip}:{container_port}")).await {
-                                Ok(mut upstream) => {
+                                Ok(upstream) => {
                                     upstream.set_nodelay(true).ok();
-                                    let result = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-                                    debug!(?result, host_port, "port forward: session ended");
+                                    let (mut cr, mut cw) = client.into_split();
+                                    let (mut ur, mut uw) = upstream.into_split();
+                                    let c2u = tokio::spawn(async move { copy(&mut cr, &mut uw).await });
+                                    let u2c = tokio::spawn(async move { copy(&mut ur, &mut cw).await });
+                                    let _ = tokio::try_join!(c2u, u2c);
+                                    debug!(host_port, "port forward: session ended");
                                 }
                                 Err(e) => {
                                     debug!(?e, "port forward: upstream connect failed");
-                                    client.shutdown().await.ok();
                                 }
                             }
                         });
