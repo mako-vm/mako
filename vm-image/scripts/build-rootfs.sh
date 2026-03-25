@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/../output"
-ROOTFS_SIZE="2G"
+ROOTFS_SIZE="64G"
 ROOTFS_IMG="${OUTPUT_DIR}/rootfs.img"
 
 DOCKER_VERSION="27.4.1"

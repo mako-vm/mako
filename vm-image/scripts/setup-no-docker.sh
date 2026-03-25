@@ -17,7 +17,7 @@ MAKO_DIR="${HOME}/.mako"
 ALPINE_VERSION="3.21"
 ALPINE_MINOR="3.21.3"
 DOCKER_VERSION="27.5.1"
-ROOTFS_SIZE="2G"
+ROOTFS_SIZE="64G"
 
 # Detect architecture
 ARCH=$(uname -m)
